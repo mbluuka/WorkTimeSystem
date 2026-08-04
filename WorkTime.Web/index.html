@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WorkTime — demo</title>
+</head>
+<body>
+  <h1>WorkTime Demo</h1>
+  <div>
+    <label>User ID: <input id="userId" /></label>
+    <label>Device ID: <input id="deviceId" /></label>
+  </div>
+  <div>
+    <button id="startWork">Start Work</button>
+    <button id="startBreak">Start Break</button>
+    <button id="endBreak">End Break</button>
+    <button id="endWork">End Work</button>
+  </div>
+  <div>
+    <button id="sync">Sync Now</button>
+  </div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    import { createEvent, getOutbox, syncOutbox } from '../WorkTime.ClientSdk/pwa-client.js';
+
+    const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+
+    document.getElementById('startWork').onclick = () => {
+      const userId = document.getElementById('userId').value;
+      const deviceId = document.getElementById('deviceId').value;
+      const ev = createEvent({ userId, deviceId, type: 'StartWork' });
+      log('Created: ' + JSON.stringify(ev));
+    };
+
+    document.getElementById('startBreak').onclick = () => {
+      const userId = document.getElementById('userId').value;
+      const deviceId = document.getElementById('deviceId').value;
+      const ev = createEvent({ userId, deviceId, type: 'StartBreak' });
+      log('Created: ' + JSON.stringify(ev));
+    };
+
+    document.getElementById('endBreak').onclick = () => {
+      const userId = document.getElementById('userId').value;
+      const deviceId = document.getElementById('deviceId').value;
+      const ev = createEvent({ userId, deviceId, type: 'EndBreak' });
+      log('Created: ' + JSON.stringify(ev));
+    };
+
+    document.getElementById('endWork').onclick = () => {
+      const userId = document.getElementById('userId').value;
+      const deviceId = document.getElementById('deviceId').value;
+      const ev = createEvent({ userId, deviceId, type: 'EndWork' });
+      log('Created: ' + JSON.stringify(ev));
+    };
+
+    document.getElementById('sync').onclick = async () => {
+      try {
+        const data = await syncOutbox({ apiBase: '' });
+        log('Sync response: ' + JSON.stringify(data));
+      } catch (e) {
+        log('Sync failed: ' + e.message);
+      }
+    };
+  </script>
+</body>
+</html>

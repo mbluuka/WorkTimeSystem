@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="WorkTime.Client/WorkTime.Client.csproj" />
+  <Project Path="WorkTime.Server/WorkTime.Server.csproj" />
+</Solution>
