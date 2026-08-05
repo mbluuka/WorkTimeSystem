@@ -1,40 +1,89 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using WorkTime.Server.Data;
 using WorkTime.Server.DTOs;
-using Npgsql;
 using WorkTime.Server.Models;
 
 namespace WorkTime.Server.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Microsoft.AspNetCore.Authorization.Authorize]
+[Authorize]
 public class WorkEventsController : ControllerBase
 {
     private readonly WorkTimeDbContext _dbContext;
     private readonly WorkTime.Server.Services.IIdempotencyService _idempotency;
     private readonly WorkTime.Server.Services.IBulkUpsertService _bulkUpsert;
+    private readonly ILogger<WorkEventsController> _logger;
 
-    public WorkEventsController(WorkTimeDbContext dbContext, WorkTime.Server.Services.IIdempotencyService idempotency, WorkTime.Server.Services.IBulkUpsertService bulkUpsert)
+    public WorkEventsController(
+        WorkTimeDbContext dbContext,
+        WorkTime.Server.Services.IIdempotencyService idempotency,
+        WorkTime.Server.Services.IBulkUpsertService bulkUpsert,
+        ILogger<WorkEventsController> logger)
     {
         _dbContext = dbContext;
         _idempotency = idempotency;
         _bulkUpsert = bulkUpsert;
+        _logger = logger;
     }
 
-    // Создание нового события рабочего времени
+    // ============================================================
+    // CREATE
+    // ============================================================
+
     [HttpPost]
-    public async Task<ActionResult<WorkEventResponse>> Create(WorkEvent workEvent)
+    public async Task<ActionResult<WorkEventResponse>> Create(
+        [FromBody] WorkEvent workEvent)
     {
-        // ensure authenticated user matches userId
-        var userId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier).Value);
-        if (userId != workEvent.UserId)
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        if (workEvent.UserId == Guid.Empty)
+        {
+            return BadRequest(new
+            {
+                message = "UserId is required."
+            });
+        }
+
+        if (workEvent.DeviceId == Guid.Empty)
+        {
+            return BadRequest(new
+            {
+                message = "DeviceId is required."
+            });
+        }
+
+        // Employee can create events only for himself.
+        if (currentRole != "Admin" &&
+            currentRole != "Manager" &&
+            workEvent.UserId != currentUserId)
         {
             return Forbid();
         }
 
+        var userExists = await _dbContext.Users
+            .AsNoTracking()
+            .AnyAsync(x => x.Id == workEvent.UserId);
+
+        if (!userExists)
+        {
+            return BadRequest(new
+            {
+                message = "User does not exist."
+            });
+        }
+
         var device = await _dbContext.Devices
+            .AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == workEvent.DeviceId);
 
         if (device is null)
@@ -47,39 +96,47 @@ public class WorkEventsController : ControllerBase
 
         if (device.UserId != workEvent.UserId)
         {
-            return BadRequest(new { message = "Device does not belong to the specified user." });
+            return BadRequest(new
+            {
+                message = "Device does not belong to the specified user."
+            });
         }
 
-        var existingEvent = await _dbContext.WorkEvents
-            .FirstOrDefaultAsync(x => x.Id == workEvent.Id);
-
-        if (existingEvent is not null)
+        // If the event already exists, make the operation idempotent.
+        if (workEvent.Id != Guid.Empty)
         {
-            return Ok(ToResponse(existingEvent));
-        }
+            var existingEvent = await _dbContext.WorkEvents
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == workEvent.Id);
 
-        // Ensure Id is set
-        if (workEvent.Id == Guid.Empty)
+            if (existingEvent is not null)
+            {
+                if (existingEvent.UserId != workEvent.UserId)
+                {
+                    return Conflict(new
+                    {
+                        message = "An event with this id already belongs to another user."
+                    });
+                }
+
+                return Ok(ToResponse(existingEvent));
+            }
+        }
+        else
         {
             workEvent.Id = Guid.NewGuid();
         }
 
-        workEvent.SyncedAt = DateTime.UtcNow;
+        workEvent.Timestamp = EnsureUtc(workEvent.Timestamp);
+        workEvent.CreatedAt = EnsureUtc(workEvent.CreatedAt);
 
-        workEvent.Timestamp = DateTime.SpecifyKind(
-            workEvent.Timestamp,
-            DateTimeKind.Utc);
-
-        workEvent.CreatedAt = DateTime.SpecifyKind(
-            workEvent.CreatedAt,
-            DateTimeKind.Utc);
-
-        if (workEvent.SyncedAt.HasValue)
+        if (workEvent.CreatedAt == default)
         {
-            workEvent.SyncedAt = DateTime.SpecifyKind(
-                workEvent.SyncedAt.Value,
-                DateTimeKind.Utc);
+            workEvent.CreatedAt = DateTime.UtcNow;
         }
+
+        workEvent.SyncedAt = DateTime.UtcNow;
+        workEvent.ServerReceivedAt = DateTime.UtcNow;
 
         _dbContext.WorkEvents.Add(workEvent);
 
@@ -89,113 +146,199 @@ public class WorkEventsController : ControllerBase
         }
         catch (DbUpdateException ex)
         {
-            if (ex.InnerException is PostgresException pgEx && pgEx.SqlState == "23505")
+            if (ex.InnerException is PostgresException pgEx &&
+                pgEx.SqlState == "23505")
             {
-                // Duplicate key - return existing entity
                 var existing = await _dbContext.WorkEvents
                     .AsNoTracking()
                     .FirstOrDefaultAsync(x => x.Id == workEvent.Id);
 
                 if (existing is not null)
                 {
-                    return Conflict(new { message = "Event already exists.", id = existing.Id });
+                    return Conflict(new
+                    {
+                        message = "Event already exists.",
+                        id = existing.Id
+                    });
                 }
             }
 
-            throw;
+            _logger.LogError(
+                ex,
+                "Failed to create WorkEvent {WorkEventId}",
+                workEvent.Id);
+
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new
+                {
+                    message = "Failed to create work event."
+                });
         }
 
         var responseDto = ToResponse(workEvent);
 
-        // Cache response for idempotency if header present
-        if (Request.Headers.TryGetValue("Idempotency-Key", out var idKey) && !string.IsNullOrWhiteSpace(idKey))
-        {
-            var json = System.Text.Json.JsonSerializer.Serialize(responseDto);
-            var bytes = System.Text.Encoding.UTF8.GetBytes(json);
-            _idempotency.Set(idKey, new WorkTime.Server.Services.CachedResponse(201, "application/json", bytes));
-        }
+        CacheIdempotencyResponse(responseDto, 201);
 
         return CreatedAtAction(
             nameof(GetById),
-            new { id = workEvent.Id },
+            new
+            {
+                id = workEvent.Id
+            },
             responseDto);
     }
 
-    // Получение события по идентификатору
+    // ============================================================
+    // GET BY ID
+    // ============================================================
+
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<WorkEventResponse>> GetById(Guid id)
     {
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
         var workEvent = await _dbContext.WorkEvents
             .AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == id);
 
         if (workEvent is null)
         {
-            return NotFound();
+            return NotFound(new
+            {
+                message = "Work event not found."
+            });
+        }
+
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                workEvent.UserId))
+        {
+            return Forbid();
         }
 
         return Ok(ToResponse(workEvent));
     }
 
-    // Получение всех событий
+    // ============================================================
+    // GET ALL
+    // ============================================================
+
     [HttpGet]
     public async Task<ActionResult<IEnumerable<WorkEventResponse>>> GetAll()
     {
-        var events = await _dbContext.WorkEvents
-            .AsNoTracking()
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        IQueryable<WorkEvent> query =
+            _dbContext.WorkEvents.AsNoTracking();
+
+        if (!IsPrivilegedRole(currentRole))
+        {
+            query = query.Where(x => x.UserId == currentUserId);
+        }
+
+        var events = await query
             .OrderBy(x => x.Timestamp)
+            .ThenBy(x => x.CreatedAt)
             .ToListAsync();
 
         return Ok(events.Select(ToResponse));
     }
 
-    // Получение событий после указанного serverOrder (cursor)
+    // ============================================================
+    // GET EVENTS SINCE SERVER ORDER
+    // ============================================================
+
     [HttpGet("events/since")]
     public async Task<ActionResult<IEnumerable<WorkEventResponse>>> GetEventsSince(
         [FromQuery] Guid userId,
         [FromQuery] long? sinceServerOrder)
     {
-        if (userId == Guid.Empty)
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
         {
-            return BadRequest(new { message = "userId is required" });
+            return Unauthorized();
         }
 
-        var query = _dbContext.WorkEvents.AsNoTracking().Where(x => x.UserId == userId);
+        if (userId == Guid.Empty)
+        {
+            return BadRequest(new
+            {
+                message = "userId is required."
+            });
+        }
+
+        // IMPORTANT:
+        // Employee can request only his own events.
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                userId))
+        {
+            return Forbid();
+        }
+
+        var query = _dbContext.WorkEvents
+            .AsNoTracking()
+            .Where(x => x.UserId == userId);
 
         if (sinceServerOrder.HasValue)
         {
-            query = query.Where(x => x.ServerOrder.HasValue && x.ServerOrder > sinceServerOrder.Value);
+            query = query.Where(
+                x => x.ServerOrder.HasValue &&
+                     x.ServerOrder > sinceServerOrder.Value);
         }
 
-        var events = await query.OrderBy(x => x.ServerOrder).ToListAsync();
+        var events = await query
+            .OrderBy(x => x.ServerOrder)
+            .ThenBy(x => x.Timestamp)
+            .ToListAsync();
 
         return Ok(events.Select(ToResponse));
     }
 
-    // Пакетная синхронизация: принимает массив событий, возвращает статус для каждого
+    // ============================================================
+    // BATCH SYNC
+    // ============================================================
+
     [HttpPost("batch")]
-    public async Task<ActionResult<BatchSyncResponse>> SyncBatch([
-        FromBody] IEnumerable<WorkEvent> workEvents)
+    public async Task<ActionResult<BatchSyncResponse>> SyncBatch(
+        [FromBody] IEnumerable<WorkEvent> workEvents)
     {
-        var list = workEvents?.ToList() ?? new List<WorkEvent>();
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        var list = workEvents?.ToList()
+                   ?? new List<WorkEvent>();
 
         if (!list.Any())
         {
-            return BadRequest(new { message = "No events provided." });
+            return BadRequest(new
+            {
+                message = "No events provided."
+            });
         }
 
-        // Normalize and set defaults
-        var currentUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier).Value);
-        var currentRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "Employee";
-
-        // Ensure user is allowed to sync these events
-        if (currentRole != "Admin" && currentRole != "Manager")
+        // Employee can synchronize only his own events.
+        if (!IsPrivilegedRole(currentRole))
         {
-            if (list.Any(e => e.UserId != currentUserId))
+            if (list.Any(x => x.UserId != currentUserId))
             {
                 return Forbid();
             }
         }
+
+        // --------------------------------------------------------
+        // Normalize events
+        // --------------------------------------------------------
 
         foreach (var ev in list)
         {
@@ -204,34 +347,74 @@ public class WorkEventsController : ControllerBase
                 ev.Id = Guid.NewGuid();
             }
 
-            ev.Timestamp = DateTime.SpecifyKind(ev.Timestamp, DateTimeKind.Utc);
-            ev.CreatedAt = DateTime.SpecifyKind(ev.CreatedAt, DateTimeKind.Utc);
-            if (ev.SyncedAt.HasValue)
+            ev.Timestamp = EnsureUtc(ev.Timestamp);
+            ev.CreatedAt = EnsureUtc(ev.CreatedAt);
+
+            if (ev.CreatedAt == default)
             {
-                ev.SyncedAt = DateTime.SpecifyKind(ev.SyncedAt.Value, DateTimeKind.Utc);
+                ev.CreatedAt = DateTime.UtcNow;
             }
-            else
-            {
-                ev.SyncedAt = DateTime.UtcNow;
-            }
+
+            ev.SyncedAt = EnsureUtc(
+                ev.SyncedAt ?? DateTime.UtcNow);
+
+            ev.ServerReceivedAt = DateTime.UtcNow;
         }
 
-        var ids = list.Select(x => x.Id).ToList();
+        // --------------------------------------------------------
+        // Validate duplicate IDs inside the same request
+        // --------------------------------------------------------
 
-        var existingIds = await _dbContext.WorkEvents
+        var duplicateIds = list
+            .GroupBy(x => x.Id)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToHashSet();
+
+        if (duplicateIds.Any())
+        {
+            return Conflict(new
+            {
+                message = "Request contains duplicate event IDs.",
+                ids = duplicateIds
+            });
+        }
+
+        // --------------------------------------------------------
+        // Load existing events
+        // --------------------------------------------------------
+
+        var ids = list
+            .Select(x => x.Id)
+            .ToList();
+
+        var existingEvents = await _dbContext.WorkEvents
             .AsNoTracking()
             .Where(x => ids.Contains(x.Id))
-            .Select(x => x.Id)
-            .ToListAsync();
+            .ToDictionaryAsync(x => x.Id);
 
-        // Preload users and devices involved for validation
-        var userIds = list.Select(x => x.UserId).Distinct().ToList();
-        var deviceIds = list.Select(x => x.DeviceId).Distinct().ToList();
+        // --------------------------------------------------------
+        // Load users
+        // --------------------------------------------------------
+
+        var userIds = list
+            .Select(x => x.UserId)
+            .Distinct()
+            .ToList();
 
         var users = await _dbContext.Users
             .AsNoTracking()
             .Where(x => userIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id);
+
+        // --------------------------------------------------------
+        // Load devices
+        // --------------------------------------------------------
+
+        var deviceIds = list
+            .Select(x => x.DeviceId)
+            .Distinct()
+            .ToList();
 
         var devices = await _dbContext.Devices
             .AsNoTracking()
@@ -239,108 +422,215 @@ public class WorkEventsController : ControllerBase
             .ToDictionaryAsync(x => x.Id);
 
         var results = new List<SyncResult>();
+        var toUpsert = new List<WorkEvent>();
 
-        var toAdd = new List<WorkEvent>();
+        // --------------------------------------------------------
+        // Validate each event
+        // --------------------------------------------------------
 
         foreach (var ev in list)
         {
-            if (existingIds.Contains(ev.Id))
+            if (existingEvents.TryGetValue(
+                    ev.Id,
+                    out var existingEvent))
             {
-                results.Add(new SyncResult { Id = ev.Id, Status = WorkTime.Server.DTOs.SyncResultStatus.Ignored, Message = "Duplicate" });
+                // Existing event belongs to another user.
+                if (existingEvent.UserId != ev.UserId)
+                {
+                    results.Add(new SyncResult
+                    {
+                        Id = ev.Id,
+                        Status = SyncResultStatus.Invalid,
+                        Message = "Event belongs to another user."
+                    });
+
+                    continue;
+                }
+
+                results.Add(new SyncResult
+                {
+                    Id = ev.Id,
+                    Status = SyncResultStatus.Ignored,
+                    Message = "Duplicate"
+                });
+
                 continue;
             }
 
             if (!users.ContainsKey(ev.UserId))
             {
-                results.Add(new SyncResult { Id = ev.Id, Status = WorkTime.Server.DTOs.SyncResultStatus.Invalid, Message = "User does not exist." });
+                results.Add(new SyncResult
+                {
+                    Id = ev.Id,
+                    Status = SyncResultStatus.Invalid,
+                    Message = "User does not exist."
+                });
+
                 continue;
             }
 
-            if (!devices.ContainsKey(ev.DeviceId))
+            if (!devices.TryGetValue(
+                    ev.DeviceId,
+                    out var device))
             {
-                results.Add(new SyncResult { Id = ev.Id, Status = WorkTime.Server.DTOs.SyncResultStatus.Invalid, Message = "Device does not exist." });
+                results.Add(new SyncResult
+                {
+                    Id = ev.Id,
+                    Status = SyncResultStatus.Invalid,
+                    Message = "Device does not exist."
+                });
+
                 continue;
             }
 
-            if (devices[ev.DeviceId].UserId != ev.UserId)
+            if (device.UserId != ev.UserId)
             {
-                results.Add(new SyncResult { Id = ev.Id, Status = WorkTime.Server.DTOs.SyncResultStatus.Invalid, Message = "Device does not belong to user." });
+                results.Add(new SyncResult
+                {
+                    Id = ev.Id,
+                    Status = SyncResultStatus.Invalid,
+                    Message = "Device does not belong to user."
+                });
+
                 continue;
             }
 
-            toAdd.Add(ev);
-            results.Add(new SyncResult { Id = ev.Id, Status = WorkTime.Server.DTOs.SyncResultStatus.Accepted });
+            toUpsert.Add(ev);
+
+            results.Add(new SyncResult
+            {
+                Id = ev.Id,
+                Status = SyncResultStatus.Accepted
+            });
         }
 
-        if (toAdd.Any())
+        // --------------------------------------------------------
+        // Bulk upsert
+        // --------------------------------------------------------
+
+        if (toUpsert.Any())
         {
             try
             {
-                await _bulkUpsert.BulkUpsertAsync(toAdd);
+                await _bulkUpsert.BulkUpsertAsync(toUpsert);
 
-                // Mark these as Upserted
-                foreach (var r in results.Where(x => x.Status == WorkTime.Server.DTOs.SyncResultStatus.Accepted))
+                foreach (var result in results.Where(
+                             x => x.Status == SyncResultStatus.Accepted))
                 {
-                    r.Status = WorkTime.Server.DTOs.SyncResultStatus.Upserted;
-                }
-
-                // Cache results for idempotency if header present
-                if (Request.Headers.TryGetValue("Idempotency-Key", out var idKeySuccess) && !string.IsNullOrWhiteSpace(idKeySuccess))
-                {
-                    var json = System.Text.Json.JsonSerializer.Serialize(results);
-                    var bytes = System.Text.Encoding.UTF8.GetBytes(json);
-                    _idempotency.Set(idKeySuccess, new WorkTime.Server.Services.CachedResponse(200, "application/json", bytes));
+                    result.Status = SyncResultStatus.Upserted;
                 }
             }
             catch (Exception ex)
             {
-                // On error, mark accepted ones as Error
-                foreach (var r in results.Where(x => x.Status == WorkTime.Server.DTOs.SyncResultStatus.Accepted))
+                _logger.LogError(
+                    ex,
+                    "Failed to bulk upsert {Count} work events",
+                    toUpsert.Count);
+
+                foreach (var result in results.Where(
+                             x => x.Status == SyncResultStatus.Accepted))
                 {
-                    r.Status = WorkTime.Server.DTOs.SyncResultStatus.Error;
-                    r.Message = "Failed to save: " + ex.Message;
+                    result.Status = SyncResultStatus.Error;
+                    result.Message = "Failed to save work events on server.";
                 }
 
-                // Cache error result too if idempotency key present
-                if (Request.Headers.TryGetValue("Idempotency-Key", out var idKeyFail) && !string.IsNullOrWhiteSpace(idKeyFail))
-                {
-                    var json = System.Text.Json.JsonSerializer.Serialize(results);
-                    var bytes = System.Text.Encoding.UTF8.GetBytes(json);
-                    _idempotency.Set(idKeyFail, new WorkTime.Server.Services.CachedResponse(200, "application/json", bytes));
-                }
+                CacheIdempotencyResponse(
+                    results,
+                    500);
+
+                return StatusCode(
+                    StatusCodes.Status500InternalServerError,
+                    new BatchSyncResponse
+                    {
+                        Results = results,
+                        Timeline = Enumerable.Empty<WorkEventResponse>(),
+                        LastServerOrder = null
+                    });
             }
         }
 
-        // After upsert (or if nothing to add), return merged timeline and lastServerOrder for the user
-        var userIdForTimeline = list.First().UserId;
-        var timeline = await _dbContext.WorkEvents
-            .AsNoTracking()
-            .Where(x => x.UserId == userIdForTimeline)
+        // --------------------------------------------------------
+        // Build timeline
+        //
+        // For Employee:
+        //     own timeline only.
+        //
+        // For Manager/Admin:
+        //     timeline for every affected user.
+        // --------------------------------------------------------
+
+        var affectedUserIds = list
+            .Select(x => x.UserId)
+            .Distinct()
+            .ToList();
+
+        IQueryable<WorkEvent> timelineQuery =
+            _dbContext.WorkEvents.AsNoTracking();
+
+        if (IsPrivilegedRole(currentRole))
+        {
+            timelineQuery = timelineQuery.Where(
+                x => affectedUserIds.Contains(x.UserId));
+        }
+        else
+        {
+            timelineQuery = timelineQuery.Where(
+                x => x.UserId == currentUserId);
+        }
+
+        var timeline = await timelineQuery
             .OrderBy(x => x.ServerOrder)
             .ThenBy(x => x.Timestamp)
             .ToListAsync();
 
-        var lastOrder = timeline.Any() ? timeline.Max(x => x.ServerOrder) : null;
+        var lastOrder = timeline
+            .Where(x => x.ServerOrder.HasValue)
+            .Select(x => x.ServerOrder!.Value)
+            .DefaultIfEmpty()
+            .Max();
 
         var response = new BatchSyncResponse
         {
             Results = results,
             Timeline = timeline.Select(ToResponse),
-            LastServerOrder = lastOrder
+            LastServerOrder =
+                timeline.Any(x => x.ServerOrder.HasValue)
+                    ? lastOrder
+                    : null
         };
+
+        CacheIdempotencyResponse(
+            response,
+            200);
 
         return Ok(response);
     }
 
-    // Получение событий конкретного пользователя
+    // ============================================================
+    // GET BY USER
+    // ============================================================
+
     [HttpGet("user/{userId:guid}")]
     public async Task<ActionResult<IEnumerable<WorkEventResponse>>> GetByUser(
-    Guid userId)
+        Guid userId)
     {
-        var currentUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier).Value);
-        var currentRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "Employee";
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
 
-        if (currentRole != "Admin" && currentRole != "Manager" && currentUserId != userId)
+        if (userId == Guid.Empty)
+        {
+            return BadRequest(new
+            {
+                message = "Invalid userId."
+            });
+        }
+
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                userId))
         {
             return Forbid();
         }
@@ -355,29 +645,120 @@ public class WorkEventsController : ControllerBase
         return Ok(events.Select(ToResponse));
     }
 
+    // ============================================================
+    // SYNC BY DATE
+    // ============================================================
+
     [HttpGet("sync")]
     public async Task<ActionResult<IEnumerable<WorkEventResponse>>> Sync(
-    [FromQuery] Guid userId,
-    [FromQuery] DateTime? since)
+        [FromQuery] Guid userId,
+        [FromQuery] DateTime? since)
     {
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        if (userId == Guid.Empty)
+        {
+            return BadRequest(new
+            {
+                message = "userId is required."
+            });
+        }
+
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                userId))
+        {
+            return Forbid();
+        }
+
         var query = _dbContext.WorkEvents
             .AsNoTracking()
             .Where(x => x.UserId == userId);
 
         if (since.HasValue)
         {
-            query = query.Where(x => x.CreatedAt > since.Value);
+            var sinceUtc = EnsureUtc(since.Value);
+
+            query = query.Where(
+                x => x.CreatedAt > sinceUtc);
         }
 
         var events = await query
             .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
             .ToListAsync();
 
         return Ok(events.Select(ToResponse));
     }
 
-    // Преобразование сущности БД в DTO ответа
-    private static WorkEventResponse ToResponse(WorkEvent workEvent)
+    // ============================================================
+    // HELPERS
+    // ============================================================
+
+    private bool TryGetCurrentUser(
+        out Guid userId,
+        out string role)
+    {
+        userId = Guid.Empty;
+        role = "Employee";
+
+        var userIdClaim = User.FindFirst(
+            ClaimTypes.NameIdentifier);
+
+        if (userIdClaim is null)
+        {
+            return false;
+        }
+
+        if (!Guid.TryParse(
+                userIdClaim.Value,
+                out userId))
+        {
+            return false;
+        }
+
+        role = User.FindFirst(
+                   ClaimTypes.Role)?.Value
+               ?? "Employee";
+
+        return true;
+    }
+
+    private static bool IsPrivilegedRole(
+        string role)
+    {
+        return role == "Admin" ||
+               role == "Manager";
+    }
+
+    private static bool CanAccessUserData(
+        Guid currentUserId,
+        string currentRole,
+        Guid targetUserId)
+    {
+        return IsPrivilegedRole(currentRole) ||
+               currentUserId == targetUserId;
+    }
+
+    private static DateTime EnsureUtc(
+        DateTime value)
+    {
+        if (value == default)
+        {
+            return value;
+        }
+
+        return DateTime.SpecifyKind(
+            value,
+            DateTimeKind.Utc);
+    }
+
+    private static WorkEventResponse ToResponse(
+        WorkEvent workEvent)
     {
         return new WorkEventResponse
         {
@@ -391,5 +772,33 @@ public class WorkEventsController : ControllerBase
             ServerReceivedAt = workEvent.ServerReceivedAt,
             ServerOrder = workEvent.ServerOrder
         };
+    }
+
+    private void CacheIdempotencyResponse(
+        object response,
+        int statusCode)
+    {
+        if (!Request.Headers.TryGetValue(
+                "Idempotency-Key",
+                out var idKey))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(idKey))
+        {
+            return;
+        }
+
+        var json = JsonSerializer.Serialize(response);
+
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        _idempotency.Set(
+            idKey!,
+            new WorkTime.Server.Services.CachedResponse(
+                statusCode,
+                "application/json",
+                bytes));
     }
 }

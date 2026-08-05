@@ -1,4 +1,6 @@
+using System.Security.Claims;
 using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using WorkTime.Server.Data;
@@ -9,102 +11,246 @@ namespace WorkTime.Server.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Microsoft.AspNetCore.Authorization.Authorize]
+[Authorize]
 public class SyncController : ControllerBase
 {
     private readonly WorkTimeDbContext _dbContext;
-    private readonly WorkTime.Server.Services.IBulkUpsertService _bulkUpsert;
 
-    public SyncController(WorkTimeDbContext dbContext, WorkTime.Server.Services.IBulkUpsertService bulkUpsert)
+    public SyncController(WorkTimeDbContext dbContext)
     {
         _dbContext = dbContext;
-        _bulkUpsert = bulkUpsert;
     }
 
     [HttpPost("operations")]
-    public async Task<ActionResult<IEnumerable<SyncOperationResult>>> PostOperations([FromBody] IEnumerable<SyncOperationRequest> ops)
+    public async Task<ActionResult<IEnumerable<SyncOperationResult>>> PostOperations(
+        [FromBody] IEnumerable<SyncOperationRequest> ops)
     {
         var list = ops?.ToList() ?? new List<SyncOperationRequest>();
-        if (!list.Any()) return BadRequest(new { message = "No operations provided" });
 
-        var currentUserId = Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier).Value);
-        var currentRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "Employee";
+        if (list.Count == 0)
+        {
+            return BadRequest(new
+            {
+                message = "No operations provided"
+            });
+        }
+
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (!Guid.TryParse(userIdClaim, out var currentUserId))
+        {
+            return Unauthorized(new
+            {
+                message = "Invalid user identity"
+            });
+        }
+
+        var currentRole =
+            User.FindFirstValue(ClaimTypes.Role)
+            ?? "Employee";
 
         var results = new List<SyncOperationResult>();
-        var toUpsertWorkEvents = new List<WorkEvent>();
 
         foreach (var op in list)
         {
-            if (currentRole != "Admin" && currentRole != "Manager" && op.UserId != currentUserId)
+            /*
+             * Если клиент не передал Id операции,
+             * сервер генерирует новый.
+             */
+            if (op.Id == Guid.Empty)
             {
-                results.Add(new SyncOperationResult { Id = op.Id, Status = "Failed", Message = "Forbidden" });
+                op.Id = Guid.NewGuid();
+            }
+
+            /*
+             * Проверяем существование операции.
+             *
+             * Это делает endpoint идемпотентным:
+             * повторная отправка той же операции
+             * не создаёт вторую запись.
+             */
+            var existing = await _dbContext.SyncQueue
+                .FirstOrDefaultAsync(x => x.Id == op.Id);
+
+            if (existing != null)
+            {
+                /*
+                 * Если операция принадлежит другому пользователю,
+                 * нельзя раскрывать её содержимое.
+                 */
+                if (existing.UserId != currentUserId &&
+                    currentRole != "Admin" &&
+                    currentRole != "Manager")
+                {
+                    results.Add(new SyncOperationResult
+                    {
+                        Id = op.Id,
+                        Status = "Forbidden",
+                        Message = "Operation belongs to another user"
+                    });
+
+                    continue;
+                }
+
+                /*
+                 * Проверяем, что повторная операция действительно
+                 * соответствует существующей.
+                 */
+                var sameOperation =
+                    existing.UserId == op.UserId &&
+                    existing.EntityType.Equals(
+                        op.EntityType,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    existing.EntityId == op.EntityId &&
+                    existing.Operation.Equals(
+                        op.Operation,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    existing.Version == op.Version &&
+                    existing.Data == op.Data.GetRawText();
+
+                if (!sameOperation)
+                {
+                    results.Add(new SyncOperationResult
+                    {
+                        Id = op.Id,
+                        Status = "Conflict",
+                        Message = "Operation with this id already exists with different data"
+                    });
+
+                    continue;
+                }
+
+                /*
+                 * Операция уже была успешно обработана.
+                 */
+                if (existing.ProcessedAt.HasValue)
+                {
+                    results.Add(new SyncOperationResult
+                    {
+                        Id = op.Id,
+                        Status = "AlreadyProcessed",
+                        Message = existing.Result ?? "Operation already processed"
+                    });
+
+                    continue;
+                }
+
+                /*
+                 * Операция уже стоит в очереди,
+                 * но ещё не обработана.
+                 */
+                results.Add(new SyncOperationResult
+                {
+                    Id = op.Id,
+                    Status = "AlreadyQueued",
+                    Message = existing.Result ?? "Operation already queued"
+                });
+
                 continue;
             }
 
+            /*
+             * Проверяем права пользователя.
+             *
+             * Employee может отправлять операции только
+             * от своего имени.
+             *
+             * Manager/Admin могут работать с другими пользователями.
+             */
+            if (currentRole != "Admin" &&
+                currentRole != "Manager" &&
+                op.UserId != currentUserId)
+            {
+                results.Add(new SyncOperationResult
+                {
+                    Id = op.Id,
+                    Status = "Forbidden",
+                    Message = "User can synchronize only own data"
+                });
+
+                continue;
+            }
+
+            /*
+             * Проверка типа сущности.
+             */
+            if (string.IsNullOrWhiteSpace(op.EntityType))
+            {
+                results.Add(new SyncOperationResult
+                {
+                    Id = op.Id,
+                    Status = "Invalid",
+                    Message = "EntityType is required"
+                });
+
+                continue;
+            }
+
+            /*
+             * Пока сервер поддерживает следующие операции.
+             */
+            var operation = op.Operation?.Trim().ToLowerInvariant();
+
+            if (operation != "create" &&
+                operation != "update" &&
+                operation != "delete")
+            {
+                results.Add(new SyncOperationResult
+                {
+                    Id = op.Id,
+                    Status = "Invalid",
+                    Message = "Unsupported operation. Allowed: create, update, delete"
+                });
+
+                continue;
+            }
+
+            /*
+             * Для create/update данные обязательны.
+             */
+            if ((operation == "create" || operation == "update") &&
+                (op.Data.ValueKind == JsonValueKind.Undefined ||
+                 op.Data.ValueKind == JsonValueKind.Null))
+            {
+                results.Add(new SyncOperationResult
+                {
+                    Id = op.Id,
+                    Status = "Invalid",
+                    Message = "Data is required for create/update operation"
+                });
+
+                continue;
+            }
+
+            /*
+             * Создаём запись очереди.
+             */
             var entry = new SyncQueueEntry
             {
-                Id = op.Id == Guid.Empty ? Guid.NewGuid() : op.Id,
+                Id = op.Id,
                 UserId = op.UserId,
-                EntityType = op.EntityType,
+                EntityType = op.EntityType.Trim(),
                 EntityId = op.EntityId,
-                Operation = op.Operation,
-                Data = op.Data.GetRawText(),
+                Operation = operation,
+                Data = op.Data.ValueKind == JsonValueKind.Undefined
+                    ? null
+                    : op.Data.GetRawText(),
                 Version = op.Version,
                 Attempts = 0,
                 CreatedAt = DateTime.UtcNow
             };
 
             _dbContext.SyncQueue.Add(entry);
-            results.Add(new SyncOperationResult { Id = entry.Id, Status = "Accepted" });
 
-            // For now, process WorkEvent create/update immediately into WorkEvents via bulk upsert
-            if (string.Equals(op.EntityType, "WorkEvent", StringComparison.OrdinalIgnoreCase) &&
-                (string.Equals(op.Operation, "create", StringComparison.OrdinalIgnoreCase) || string.Equals(op.Operation, "update", StringComparison.OrdinalIgnoreCase)))
+            results.Add(new SyncOperationResult
             {
-                try
-                {
-                    var we = JsonSerializer.Deserialize<WorkEvent>(op.Data.GetRawText());
-                    if (we != null)
-                    {
-                        // ensure server fields
-                        we.ServerReceivedAt = DateTime.UtcNow;
-                        toUpsertWorkEvents.Add(we);
-                        entry.ProcessedAt = DateTime.UtcNow;
-                        entry.Result = "Applied";
-                    }
-                }
-                catch (Exception ex)
-                {
-                    entry.Result = "Failed: " + ex.Message;
-                }
-            }
+                Id = entry.Id,
+                Status = "Accepted",
+                Message = "Operation accepted for processing"
+            });
         }
 
         await _dbContext.SaveChangesAsync();
-
-        if (toUpsertWorkEvents.Any())
-        {
-            try
-            {
-                await _bulkUpsert.BulkUpsertAsync(toUpsertWorkEvents);
-            }
-            catch (Exception ex)
-            {
-                // mark failed entries
-                foreach (var we in toUpsertWorkEvents)
-                {
-                    var q = await _dbContext.SyncQueue.FirstOrDefaultAsync(x => x.EntityId == we.Id && x.EntityType == "WorkEvent");
-                    if (q != null)
-                    {
-                        q.Result = "Failed apply: " + ex.Message;
-                        q.Attempts += 1;
-                        q.NextRetry = DateTime.UtcNow.AddMinutes(5);
-                    }
-                }
-
-                await _dbContext.SaveChangesAsync();
-            }
-        }
 
         return Ok(results);
     }

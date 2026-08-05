@@ -100,9 +100,25 @@ public class WorkTimeDbContext : DbContext
         modelBuilder.Entity<SyncQueueEntry>(entity =>
         {
             entity.HasKey(x => x.Id);
-            entity.Property(x => x.Data).HasColumnType("jsonb");
-            entity.Property(x => x.CreatedAt).HasDefaultValueSql("now()");
-            entity.HasIndex(x => new { x.UserId, x.EntityType });
+
+            entity.Property(x => x.Data)
+                .HasColumnType("jsonb");
+
+            entity.Property(x => x.CreatedAt)
+                .HasDefaultValueSql("now()");
+
+            entity.HasIndex(x => new
+            {
+                x.UserId,
+                x.EntityType
+            });
+
+            entity.HasIndex(x => new
+            {
+                x.ProcessedAt,
+                x.NextRetry,
+                x.Attempts
+            });
         });
     }
 }
