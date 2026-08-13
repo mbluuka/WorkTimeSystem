@@ -16,12 +16,33 @@ public class WorkTimeDbContext : DbContext
 
     public DbSet<WorkEvent> WorkEvents => Set<WorkEvent>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
+    public DbSet<Project> Projects => Set<Project>();
+    public DbSet<Report> Reports => Set<Report>();
+    public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<IdempotencyEntry> IdempotencyEntries => Set<IdempotencyEntry>();
     public DbSet<SyncQueueEntry> SyncQueue => Set<SyncQueueEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        // Configure Report entity
+        modelBuilder.Entity<Report>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.DataJson)
+                .HasColumnType("jsonb");
+
+            entity.Property(x => x.ReportType)
+                .IsRequired()
+                .HasMaxLength(50);
+
+            entity.HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
 
         modelBuilder.Entity<User>(entity =>
         {
@@ -119,6 +140,39 @@ public class WorkTimeDbContext : DbContext
                 x.NextRetry,
                 x.Attempts
             });
+        });
+
+        modelBuilder.Entity<Project>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Name)
+                .IsRequired()
+                .HasMaxLength(200);
+
+            entity.HasOne(x => x.Manager)
+                .WithMany()
+                .HasForeignKey(x => x.ManagerId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasMany(x => x.TimeEntries)
+                .WithOne(x => x.Project)
+                .HasForeignKey(x => x.ProjectId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<AuditLog>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Action)
+                .IsRequired()
+                .HasMaxLength(100);
+
+            entity.HasOne(x => x.Admin)
+                .WithMany()
+                .HasForeignKey(x => x.AdminId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

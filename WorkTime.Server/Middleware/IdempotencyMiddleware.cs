@@ -21,7 +21,13 @@ public class IdempotencyMiddleware
             return;
         }
 
-        var key = keyValues.First();
+        var key = keyValues.First() ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            await _next(context);
+            return;
+        }
 
         // Only cache POST/PUT/PATCH
         if (!(context.Request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase)
@@ -41,7 +47,7 @@ public class IdempotencyMiddleware
                 context.Response.ContentType = cached.ContentType;
             }
 
-            await context.Response.Body.WriteAsync(cached.Body, 0, cached.Body.Length);
+            await context.Response.Body.WriteAsync(cached.Body ?? Array.Empty<byte>(), 0, (cached.Body ?? Array.Empty<byte>()).Length);
             return;
         }
 

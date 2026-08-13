@@ -22,6 +22,39 @@ namespace WorkTime.Server.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("WorkTime.Server.Models.AuditLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("AdminId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Details")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("TargetUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TargetUserName")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("Timestamp")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdminId");
+
+                    b.ToTable("AuditLogs");
+                });
+
             modelBuilder.Entity("WorkTime.Server.Models.Device", b =>
                 {
                     b.Property<Guid>("Id")
@@ -73,6 +106,70 @@ namespace WorkTime.Server.Migrations
                     b.HasKey("Key");
 
                     b.ToTable("IdempotencyEntries");
+                });
+
+            modelBuilder.Entity("WorkTime.Server.Models.Project", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("ManagerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ManagerId");
+
+                    b.ToTable("Projects");
+                });
+
+            modelBuilder.Entity("WorkTime.Server.Models.Report", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DataJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime>("PeriodEnd")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("PeriodStart")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReportType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Reports");
                 });
 
             modelBuilder.Entity("WorkTime.Server.Models.SyncQueueEntry", b =>
@@ -141,6 +238,9 @@ namespace WorkTime.Server.Migrations
                     b.Property<DateTime?>("End")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("Start")
                         .HasColumnType("timestamp with time zone");
 
@@ -151,6 +251,8 @@ namespace WorkTime.Server.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ProjectId");
 
                     b.HasIndex("UserId", "Start");
 
@@ -173,6 +275,9 @@ namespace WorkTime.Server.Migrations
 
                     b.Property<string>("FullName")
                         .HasColumnType("text");
+
+                    b.Property<bool>("IsBlocked")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -239,6 +344,17 @@ namespace WorkTime.Server.Migrations
                     b.ToTable("WorkEvents");
                 });
 
+            modelBuilder.Entity("WorkTime.Server.Models.AuditLog", b =>
+                {
+                    b.HasOne("WorkTime.Server.Models.User", "Admin")
+                        .WithMany()
+                        .HasForeignKey("AdminId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Admin");
+                });
+
             modelBuilder.Entity("WorkTime.Server.Models.Device", b =>
                 {
                     b.HasOne("WorkTime.Server.Models.User", "User")
@@ -250,13 +366,42 @@ namespace WorkTime.Server.Migrations
                     b.Navigation("User");
                 });
 
-            modelBuilder.Entity("WorkTime.Server.Models.TimeEntry", b =>
+            modelBuilder.Entity("WorkTime.Server.Models.Project", b =>
+                {
+                    b.HasOne("WorkTime.Server.Models.User", "Manager")
+                        .WithMany()
+                        .HasForeignKey("ManagerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Manager");
+                });
+
+            modelBuilder.Entity("WorkTime.Server.Models.Report", b =>
                 {
                     b.HasOne("WorkTime.Server.Models.User", "User")
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("WorkTime.Server.Models.TimeEntry", b =>
+                {
+                    b.HasOne("WorkTime.Server.Models.Project", "Project")
+                        .WithMany("TimeEntries")
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("WorkTime.Server.Models.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Project");
 
                     b.Navigation("User");
                 });
@@ -283,6 +428,11 @@ namespace WorkTime.Server.Migrations
             modelBuilder.Entity("WorkTime.Server.Models.Device", b =>
                 {
                     b.Navigation("WorkEvents");
+                });
+
+            modelBuilder.Entity("WorkTime.Server.Models.Project", b =>
+                {
+                    b.Navigation("TimeEntries");
                 });
 
             modelBuilder.Entity("WorkTime.Server.Models.User", b =>

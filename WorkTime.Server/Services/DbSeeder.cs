@@ -1,6 +1,7 @@
 using BCrypt.Net;
 using Microsoft.EntityFrameworkCore;
 using WorkTime.Server.Data;
+using WorkTime.Server.Models;
 
 namespace WorkTime.Server.Services;
 

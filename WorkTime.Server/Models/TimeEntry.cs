@@ -10,9 +10,13 @@ public class TimeEntry
 
     public DateTime? End { get; set; }
 
+    public Guid? ProjectId { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }
 
     public User? User { get; set; }
+
+    public Project? Project { get; set; }
 }

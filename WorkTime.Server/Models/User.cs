@@ -14,6 +14,8 @@ public class User
 
     public string? FullName { get; set; }
 
+    public bool IsBlocked { get; set; }
+
     public long SyncVersion { get; set; }
 
     public DateTime CreatedAt { get; set; }
