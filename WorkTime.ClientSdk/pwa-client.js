@@ -1,5 +1,5 @@
-// Ïðîñòàÿ êëèåíòñêàÿ áèáëèîòåêà äëÿ PWA (äåìî)
-// Õðàíåíèå ñîáûòèé â IndexedDB (ïðîñòàÿ îá¸ðòêà)
+// ÐšÐ»Ð¸ÐµÐ½Ñ‚ÑÐºÐ¸Ð¹ SDK Ð´Ð»Ñ PWA (Ð²ÐµÐ±)
+// Ð¥Ñ€Ð°Ð½ÐµÐ½Ð¸Ðµ ÑÐ¾Ð±Ñ‹Ñ‚Ð¸Ð¹ Ð² IndexedDB (Ð¾Ñ„Ð»Ð°Ð¹Ð½-Ð¾Ñ‡ÐµÑ€ÐµÐ´ÑŒ)
 
 const DB_NAME = 'worktime_db';
 const DB_VERSION = 1;
@@ -83,11 +83,11 @@ export async function clearOutbox(ids){
   });
 }
 
-export async function syncOutbox({ apiBase = '', idempotencyKey = null } = {}){
+export async function syncOutbox({ apiBase = '', idempotencyKey = null, token = null } = {}){
   const outbox = await getOutbox();
   if (!outbox.length) return { results: [] };
 
-  // Transform outbox events into SyncOperationRequest items
+  // ÐŸÑ€ÐµÐ¾Ð±Ñ€Ð°Ð·ÑƒÐµÐ¼ ÑÐ¾Ð±Ñ‹Ñ‚Ð¸Ñ Ð¾Ñ‡ÐµÑ€ÐµÐ´Ð¸ Ð² Ð¾Ð¿ÐµÑ€Ð°Ñ†Ð¸Ð¸ ÑÐ¸Ð½Ñ…Ñ€Ð¾Ð½Ð¸Ð·Ð°Ñ†Ð¸Ð¸
   const ops = outbox.map(ev => ({
     Id: ev.Id,
     UserId: ev.UserId,
@@ -100,6 +100,7 @@ export async function syncOutbox({ apiBase = '', idempotencyKey = null } = {}){
 
   const headers = { 'Content-Type': 'application/json' };
   if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const resp = await fetch(`${apiBase}/api/sync/operations`, {
     method: 'POST',
