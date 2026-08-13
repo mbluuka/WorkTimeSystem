@@ -47,7 +47,8 @@ public class IdempotencyMiddleware
                 context.Response.ContentType = cached.ContentType;
             }
 
-            await context.Response.Body.WriteAsync(cached.Body ?? Array.Empty<byte>(), 0, (cached.Body ?? Array.Empty<byte>()).Length);
+            var cachedBody = cached.Body ?? Array.Empty<byte>();
+            await context.Response.Body.WriteAsync(cachedBody, 0, cachedBody.Length);
             return;
         }
 

@@ -1,8 +1,12 @@
 using System.Security.Claims;
 using System.Text.Json;
+using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using QuestPDF.Fluent;
+using QuestPDF.Helpers;
+using QuestPDF.Infrastructure;
 using WorkTime.Server.Data;
 using WorkTime.Server.DTOs;
 using WorkTime.Server.Models;
@@ -23,9 +27,6 @@ public class ReportsController : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>
-    /// Сводка по пользователю за период.
-    /// </summary>
     [HttpGet("summary")]
     public async Task<ActionResult<ReportSummaryResponse>> GetSummary(
         [FromQuery] Guid userId,
@@ -45,16 +46,11 @@ public class ReportsController : ControllerBase
             .ToListAsync();
 
         var summary = BuildSummary(userId, events, from, to);
-
-        // Save cached report
         await SaveReportAsync(userId, from, to, "summary", summary);
 
         return Ok(summary);
     }
 
-    /// <summary>
-    /// Сводка по команде (Manager/Admin).
-    /// </summary>
     [HttpGet("team")]
     public async Task<ActionResult<TeamReportResponse>> GetTeamReport(
         [FromQuery] DateTime from,
@@ -68,18 +64,9 @@ public class ReportsController : ControllerBase
         if (currentRole != "Admin" && currentRole != "Manager")
             return Forbid();
 
-        // Get all users the manager can see
-        IQueryable<User> usersQuery;
-        if (currentRole == "Admin")
-        {
-            usersQuery = _dbContext.Users.AsNoTracking();
-        }
-        else
-        {
-            // Manager sees only their own team - for now all non-admin users
-            usersQuery = _dbContext.Users.AsNoTracking()
-                .Where(u => u.Role == "Employee" || u.Role == "Manager");
-        }
+        IQueryable<User> usersQuery = currentRole == "Admin"
+            ? _dbContext.Users.AsNoTracking()
+            : _dbContext.Users.AsNoTracking().Where(u => u.Role == "Employee" || u.Role == "Manager");
 
         var users = await usersQuery.ToListAsync();
         var teamSummaries = new List<EmployeeSummary>();
@@ -101,8 +88,7 @@ public class ReportsController : ControllerBase
                 UserName = user.Email,
                 TotalWorkMinutes = userSummary.TotalWorkMinutes,
                 TotalBreakMinutes = userSummary.TotalBreakMinutes,
-                DaysWorked = userSummary.Days.Count,
-                ProjectName = null
+                DaysWorked = userSummary.Days.Count
             });
 
             totalTeamMinutes += userSummary.TotalWorkMinutes;
@@ -121,9 +107,6 @@ public class ReportsController : ControllerBase
         return Ok(response);
     }
 
-    /// <summary>
-    /// Экспорт отчёта в PDF (заглушка — возвращает JSON для MVP).
-    /// </summary>
     [HttpGet("export/pdf")]
     public async Task<IActionResult> ExportPdf(
         [FromQuery] Guid userId,
@@ -145,27 +128,97 @@ public class ReportsController : ControllerBase
         var summary = BuildSummary(userId, events, from, to);
         var user = await _dbContext.Users.FindAsync(userId);
 
-        // Для MVP возвращаем JSON. В продакшене заменить на QuestPDF
-        var pdfData = new
+        QuestPDF.Settings.License = LicenseType.Community;
+
+        var document = Document.Create(container =>
         {
-            title = "Отчёт о рабочем времени",
-            user = user?.FullName ?? user?.Email,
-            period = $"{from:dd.MM.yyyy} — {to:dd.MM.yyyy}",
-            totalWorkHours = summary.TotalWorkHours,
-            totalBreakMinutes = summary.TotalBreakMinutes,
-            days = summary.Days
-        };
+            container.Page(page =>
+            {
+                page.Size(PageSizes.A4);
+                page.Margin(2, Unit.Centimetre);
+                page.PageColor(Colors.White);
+                page.DefaultTextStyle(x => x.FontSize(12));
 
-        // В продакшене:
-        // var pdfDocument = PDFGenerator.Generate(summary, user);
-        // return File(pdfDocument.ToArray(), "application/pdf", $"report_{userId:yyyyMMdd}.pdf");
+                page.Header()
+                    .Text("WorkTime — Отчёт о рабочем времени")
+                    .SemiBold().FontSize(20).FontColor(Colors.Blue.Medium);
 
-        return Ok(pdfData);
+                page.Content()
+                    .PaddingVertical(1, Unit.Centimetre)
+                    .Column(col =>
+                    {
+                        col.Spacing(10);
+
+                        col.Item().Text($"Пользователь: {user?.FullName ?? user?.Email ?? "Неизвестно"}").FontSize(14).Bold();
+                        col.Item().Text($"Период: {from:dd.MM.yyyy} — {to:dd.MM.yyyy}").FontSize(12).FontColor(Colors.Grey.Medium);
+
+                        col.Item().Text($"Часов отработано: {summary.TotalWorkHours}").FontSize(13);
+                        col.Item().Text($"Минут перерывов: {summary.TotalBreakMinutes}").FontSize(13);
+                        col.Item().Text($"Осталось до 8ч: {summary.RemainingMinutes} мин").FontSize(13);
+                        col.Item().Text($"Дней отработано: {summary.Days.Count}").FontSize(13);
+
+                        col.Item().PaddingTop(10).Text("Детализация по дням").FontSize(14).Bold();
+
+                        if (summary.Days.Count == 0)
+                        {
+                            col.Item().Text("Нет данных за выбранный период").FontColor(Colors.Grey.Medium);
+                        }
+                        else
+                        {
+                            col.Item().Table(table =>
+                            {
+                                table.ColumnsDefinition(c =>
+                                {
+                                    c.RelativeColumn(2);
+                                    c.RelativeColumn(2);
+                                    c.RelativeColumn(2);
+                                    c.RelativeColumn(2);
+                                    c.RelativeColumn(2);
+                                });
+
+                                table.Header(header =>
+                                {
+                                    header.Cell().Text("Дата").Bold().FontColor(Colors.White);
+                                    header.Cell().Text("Начало").Bold().FontColor(Colors.White);
+                                    header.Cell().Text("Конец").Bold().FontColor(Colors.White);
+                                    header.Cell().Text("Работа (мин)").Bold().FontColor(Colors.White);
+                                    header.Cell().Text("Перерыв (мин)").Bold().FontColor(Colors.White);
+
+                                    header.Cell().Background(Colors.Blue.Medium).Padding(5);
+                                    header.Cell().Background(Colors.Blue.Medium).Padding(5);
+                                    header.Cell().Background(Colors.Blue.Medium).Padding(5);
+                                    header.Cell().Background(Colors.Blue.Medium).Padding(5);
+                                    header.Cell().Background(Colors.Blue.Medium).Padding(5);
+                                });
+
+                                foreach (var day in summary.Days)
+                                {
+                                    table.Cell().Text(day.Date.ToString("dd.MM.yyyy"));
+                                    table.Cell().Text(day.StartWork?.ToString("HH:mm") ?? "—");
+                                    table.Cell().Text(day.EndWork?.ToString("HH:mm") ?? "—");
+                                    table.Cell().Text(day.WorkMinutes.ToString());
+                                    table.Cell().Text(day.BreakMinutes.ToString());
+                                }
+                            });
+                        }
+                    });
+
+                page.Footer()
+                    .AlignCenter()
+                    .Text(x =>
+                    {
+                        x.Span("Страница ");
+                        x.CurrentPageNumber();
+                    });
+            });
+        });
+
+        var pdfBytes = document.GeneratePdf();
+        var fileName = $"report_{userId:yyyyMMddHHmmss}.pdf";
+
+        return File(pdfBytes, "application/pdf", fileName);
     }
 
-    /// <summary>
-    /// Экспорт отчёта в XLSX (заглушка).
-    /// </summary>
     [HttpGet("export/xlsx")]
     public async Task<IActionResult> ExportXlsx(
         [FromQuery] Guid userId,
@@ -184,13 +237,69 @@ public class ReportsController : ControllerBase
             .OrderBy(w => w.Timestamp)
             .ToListAsync();
 
-        // В продакшене: ClosedXML
-        // var workbook = new XLWorkbook();
-        // var worksheet = workbook.Worksheets.Add("Report");
-        // ...
-        // return File(workbook.SaveAsBytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"report_{userId:yyyyMMdd}.xlsx");
+        var summary = BuildSummary(userId, events, from, to);
+        var user = await _dbContext.Users.FindAsync(userId);
 
-        return Ok(new { message = "XLSX export — implement ClosedXML for production" });
+        using var workbook = new XLWorkbook();
+        var ws = workbook.Worksheets.Add("Отчёт");
+
+        ws.Cell(1, 1).Value = "WorkTime — Отчёт о рабочем времени";
+        ws.Cell(1, 1).Style.Font.Bold = true;
+        ws.Cell(1, 1).Style.Font.FontSize = 16;
+        ws.Cell(1, 1).Style.Font.FontColor = XLColor.Blue;
+        ws.Range(1, 1, 1, 5).Merge();
+
+        ws.Cell(2, 1).Value = "Пользователь:";
+        ws.Cell(2, 2).Value = user?.FullName ?? user?.Email ?? "Неизвестно";
+        ws.Cell(3, 1).Value = "Период:";
+        ws.Cell(3, 2).Value = $"{from:dd.MM.yyyy} — {to:dd.MM.yyyy}";
+
+        ws.Cell(5, 1).Value = "Показатель";
+        ws.Cell(5, 2).Value = "Значение";
+        ws.Range(5, 1, 5, 2).Style.Font.Bold = true;
+        ws.Range(5, 1, 5, 2).Style.Fill.BackgroundColor = XLColor.Blue;
+        ws.Range(5, 1, 5, 2).Style.Font.FontColor = XLColor.White;
+
+        ws.Cell(6, 1).Value = "Часов отработано";
+        ws.Cell(6, 2).Value = summary.TotalWorkHours;
+        ws.Cell(7, 1).Value = "Минут перерывов";
+        ws.Cell(7, 2).Value = summary.TotalBreakMinutes;
+        ws.Cell(8, 1).Value = "Осталось до 8ч";
+        ws.Cell(8, 2).Value = summary.RemainingMinutes;
+        ws.Cell(9, 1).Value = "Дней отработано";
+        ws.Cell(9, 2).Value = summary.Days.Count;
+
+        ws.Cell(11, 1).Value = "Детализация по дням";
+        ws.Cell(11, 1).Style.Font.Bold = true;
+        ws.Cell(11, 1).Style.Font.FontSize = 14;
+
+        ws.Cell(12, 1).Value = "Дата";
+        ws.Cell(12, 2).Value = "Начало";
+        ws.Cell(12, 3).Value = "Конец";
+        ws.Cell(12, 4).Value = "Работа (мин)";
+        ws.Cell(12, 5).Value = "Перерыв (мин)";
+        ws.Range(12, 1, 12, 5).Style.Font.Bold = true;
+        ws.Range(12, 1, 12, 5).Style.Fill.BackgroundColor = XLColor.Blue;
+        ws.Range(12, 1, 12, 5).Style.Font.FontColor = XLColor.White;
+
+        int row = 13;
+        foreach (var day in summary.Days)
+        {
+            ws.Cell(row, 1).Value = day.Date.ToString("dd.MM.yyyy");
+            ws.Cell(row, 2).Value = day.StartWork?.ToString("HH:mm") ?? "—";
+            ws.Cell(row, 3).Value = day.EndWork?.ToString("HH:mm") ?? "—";
+            ws.Cell(row, 4).Value = day.WorkMinutes;
+            ws.Cell(row, 5).Value = day.BreakMinutes;
+            row++;
+        }
+
+        ws.Columns().AdjustToContents();
+
+        using var ms = new MemoryStream();
+        workbook.SaveAs(ms);
+        var fileName = $"report_{userId:yyyyMMddHHmmss}.xlsx";
+
+        return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
     }
 
     // --- Helpers ---
@@ -219,7 +328,6 @@ public class ReportsController : ControllerBase
         long totalWorkMinutes = 0;
         long totalBreakMinutes = 0;
 
-        // Group by date
         var groupedByDate = events.GroupBy(w => w.Timestamp.Date).ToList();
 
         foreach (var dateGroup in groupedByDate)
