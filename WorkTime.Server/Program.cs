@@ -124,6 +124,7 @@ using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<WorkTimeDbContext>();
         db.Database.Migrate();
+        await DbSeeder.SeedAsync(db);
     }
     catch (Exception ex)
     {

@@ -1,20 +1,30 @@
-﻿using System.Net.Http.Json;
+﻿using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using WorkTime.Client.Models;
 using WorkTime.Client.Storage;
 
-namespace WorkTime.Client.Servvices;
+namespace WorkTime.Client.Services;
 
 public class SyncService
 {
     private readonly LocalEventStore _store;
     private readonly HttpClient _httpClient;
+    private readonly string? _token;
 
     public SyncService(
         LocalEventStore store,
-        HttpClient httpClient)
+        HttpClient httpClient,
+        string? token = null)
     {
         _store = store;
         _httpClient = httpClient;
+        _token = token;
+
+        if (!string.IsNullOrWhiteSpace(_token))
+        {
+            _httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", _token);
+        }
     }
 
     public async Task SyncPendingEventsAsync()
@@ -24,6 +34,12 @@ public class SyncService
         Console.WriteLine();
         Console.WriteLine(
             $"Найдено событий для синхронизации: {pendingEvents.Count}");
+
+        if (pendingEvents.Count == 0)
+        {
+            Console.WriteLine("Нет событий для отправки.");
+            return;
+        }
 
         foreach (var workEvent in pendingEvents)
         {
@@ -54,10 +70,11 @@ public class SyncService
                 }
                 else
                 {
+                    var errorText = await response.Content.ReadAsStringAsync();
                     Console.WriteLine(
                         $"✗ {workEvent.Type} " +
                         $"({workEvent.Id}) — " +
-                        $"HTTP {(int)response.StatusCode}");
+                        $"HTTP {(int)response.StatusCode}: {errorText}");
                 }
             }
             catch (Exception ex)
