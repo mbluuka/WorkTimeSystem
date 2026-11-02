@@ -42,13 +42,13 @@ export default function ManagerView({ user }) {
   }
 
   const handleExport = async (format) => {
+    const fromIso = new Date(from).toISOString();
+    const toIso = new Date(to + 'T23:59:59').toISOString();
     try {
-      const data = format === 'pdf'
-        ? await api.exportPdf(user.id, new Date(from).toISOString(), new Date(to + 'T23:59:59').toISOString())
-        : await api.exportXlsx(user.id, new Date(from).toISOString(), new Date(to + 'T23:59:59').toISOString())
-      alert(JSON.stringify(data, null, 2))
+      if (format === 'pdf') await api.exportPdf(user.id, fromIso, toIso);
+      else await api.exportXlsx(user.id, fromIso, toIso);
     } catch (e) {
-      alert('Ошибка экспорта: ' + e.message)
+      setError('Ошибка экспорта: ' + e.message);
     }
   }
 

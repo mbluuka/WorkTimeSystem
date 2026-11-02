@@ -1,6 +1,36 @@
 import React, { useState } from 'react'
 import { api, setToken, setCurrentUser } from '../api'
 
+// Надёжное декодирование JWT payload (base64url → JSON)
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    let payload = parts[1]
+    // base64url → standard base64
+    payload = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const pad = payload.length % 4
+    if (pad) payload += '='.repeat(4 - pad)
+    const json = atob(payload)
+    return JSON.parse(json)
+  } catch {
+    return null
+  }
+}
+
+// Извлекаем userId из JWT — .NET 8 может использовать длинный URI или short name
+function extractUserId(payload) {
+  if (!payload) return null
+  return (
+    payload.nameid ||
+    payload.NameIdentifier ||
+    payload['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier'] ||
+    payload.unique_name ||
+    payload.sub ||
+    null
+  )
+}
+
 export default function Login({ onLogin }) {
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('')
@@ -21,9 +51,19 @@ export default function Login({ onLogin }) {
         res = await api.register(email, password, fullName)
       }
       setToken(res.token)
-      // Decode JWT to get user info
-      const payload = JSON.parse(atob(res.token.split('.')[1]))
-      setCurrentUser({ id: payload.nameid, email, role: res.role })
+
+      // Декодируем JWT для получения id пользователя
+      const payload = decodeJwtPayload(res.token)
+      const userId = extractUserId(payload)
+      if (!userId) {
+        console.warn('JWT payload:', payload)
+        setError('Не удалось извлечь данные пользователя из токена. Проверьте консоль (F12).')
+        setToken('')
+        setCurrentUser(null)
+        return
+      }
+
+      setCurrentUser({ id: userId, email, role: res.role })
       onLogin()
     } catch (err) {
       setError(err.message)

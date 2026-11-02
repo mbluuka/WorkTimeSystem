@@ -60,6 +60,40 @@ async function request(path, options = {}) {
   return resp.json();
 }
 
+// Экспорт отдаёт бинарные файлы (PDF/XLSX), поэтому ответ читается как Blob,
+// а не как JSON, и сразу сохраняется на диск.
+async function downloadFile(path, filename) {
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const resp = await fetch(`${API_BASE}${path}`, { headers });
+
+  if (resp.status === 401) {
+    setToken('');
+    setCurrentUser(null);
+    throw new Error('Не авторизован');
+  }
+
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const data = await resp.json();
+      if (data.message) msg = data.message;
+    } catch { /* binary or empty body */ }
+    throw new Error(msg);
+  }
+
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   // Auth
   login: (email, password) => request('/api/auth/login', {
@@ -83,6 +117,12 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(events)
   }),
+  // Ручная корректировка события (FR7)
+  updateEvent: (id, data) => request(`/api/workevents/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data)
+  }),
+  deleteEvent: (id) => request(`/api/workevents/${id}`, { method: 'DELETE' }),
 
   // Sync operations
   postOperations: (ops) => request('/api/sync/operations', {
@@ -110,15 +150,21 @@ export const api = {
   updateTimeEntry: (id, data) => request(`/api/timeentries/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteTimeEntry: (id) => request(`/api/timeentries/${id}`, { method: 'DELETE' }),
 
+  // Devices
+  getDevices: () => request('/api/devices'),
+  registerDevice: (data) => request('/api/devices', { method: 'POST', body: JSON.stringify(data) }),
+
   // Reports
   getSummary: (userId, from, to) =>
     request(`/api/reports/summary?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   getTeamReport: (from, to) =>
     request(`/api/reports/team?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   exportPdf: (userId, from, to) =>
-    request(`/api/reports/export/pdf?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    downloadFile(`/api/reports/export/pdf?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      `report_${userId}.pdf`),
   exportXlsx: (userId, from, to) =>
-    request(`/api/reports/export/xlsx?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    downloadFile(`/api/reports/export/xlsx?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      `report_${userId}.xlsx`),
 
   // Audit logs (admin)
   getAuditLogs: (page = 1, pageSize = 50) =>

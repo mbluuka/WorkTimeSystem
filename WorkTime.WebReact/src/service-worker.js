@@ -17,11 +17,9 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  // Try network first for API calls, otherwise cache-first
+  // For API calls, always use network (no caching)
   if (req.url.includes('/api/')) {
-    event.respondWith(
-      fetch(req).catch(() => caches.match(req))
-    );
+    event.respondWith(fetch(req));
     return;
   }
 

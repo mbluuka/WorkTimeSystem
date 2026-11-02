@@ -39,7 +39,7 @@ export async function nextDeviceSeq(){
   });
 }
 
-export async function createEvent({ userId, deviceId, type, timestamp = new Date() }){
+export async function createEvent({ userId, deviceId, type, timestamp = new Date(), projectId = null }){
   const seq = await nextDeviceSeq();
   const ev = {
     Id: crypto.randomUUID(),
@@ -50,6 +50,9 @@ export async function createEvent({ userId, deviceId, type, timestamp = new Date
     CreatedAt: new Date().toISOString(),
     DeviceSeq: seq
   };
+
+  // Проект опционален (FR5); null означает "без проекта" и не сериализуется в FK.
+  if (projectId) ev.ProjectId = projectId;
 
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -83,6 +86,23 @@ export async function clearOutbox(ids){
   });
 }
 
+// Ручная корректировка ещё не отправленного события (FR7):
+// запись перезаписывается по тому же ключу Id.
+export async function updateOutboxEvent(event){
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, 'readwrite');
+    const store = tx.objectStore(OUTBOX_STORE);
+    store.put(event);
+    tx.oncomplete = () => resolve(event);
+    tx.onerror = () => reject(tx.error || store.error);
+  });
+}
+
+export async function deleteOutboxEvent(id){
+  return clearOutbox([id]);
+}
+
 export async function syncOutbox({ apiBase = '', idempotencyKey = null, token = null } = {}){
   const outbox = await getOutbox();
   if (!outbox.length) return { results: [] };
@@ -112,7 +132,17 @@ export async function syncOutbox({ apiBase = '', idempotencyKey = null, token = 
 
   const data = await resp.json();
 
-  const acceptedIds = (data || []).filter(r => r.status === 'Applied' || r.status === 'Accepted').map(r => r.id);
+  // Удаляем из outbox операции, которые сервер принял или уже имел у себя:
+  // - Accepted / Applied — приняты в очередь / применены;
+  // - AlreadyQueued / AlreadyProcessed — сервер уже имеет эту же операцию
+  //   (идемпотентность по Id): локальная копия больше не нужна;
+  // - Deleted — событие удалено на сервере.
+  // Conflict / Invalid / Forbidden означают проблему — оставляем в outbox,
+  // чтобы пользователь увидел запись и мог скорректировать или удалить её.
+  const doneStatuses = ['Accepted', 'Applied', 'AlreadyQueued', 'AlreadyProcessed', 'Deleted'];
+  const acceptedIds = (data || [])
+    .filter(r => doneStatuses.includes(r.status))
+    .map(r => r.id);
   if (acceptedIds.length) await clearOutbox(acceptedIds);
 
   return data;
