@@ -156,6 +156,7 @@ public class UsersController : ControllerBase
         if (user.Id == currentUserId)
             return BadRequest(new { message = "Cannot block your own account" });
 
+        user.IsBlocked = true;
         user.UpdatedAt = DateTime.UtcNow;
         await _dbContext.SaveChangesAsync();
 
@@ -174,6 +175,7 @@ public class UsersController : ControllerBase
         if (user is null)
             return NotFound();
 
+        user.IsBlocked = false;
         user.UpdatedAt = DateTime.UtcNow;
         await _dbContext.SaveChangesAsync();
 
@@ -230,7 +232,7 @@ public class UsersController : ControllerBase
             Name = user.Name,
             FullName = user.FullName,
             Role = user.Role,
-            IsBlocked = false,
+            IsBlocked = user.IsBlocked,
             CreatedAt = user.CreatedAt,
             UpdatedAt = user.UpdatedAt
         };

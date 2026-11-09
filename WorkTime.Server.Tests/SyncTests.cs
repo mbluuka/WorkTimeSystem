@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
 using WorkTime.Server.Controllers;
 using WorkTime.Server.Data;
 using WorkTime.Server.Models;
@@ -20,6 +22,26 @@ public class SyncTests
 
         var ctx = new WorkTimeDbContext(options);
         return ctx;
+    }
+
+    // Контроллер определяет пользователя и роль из JWT-claims,
+    // поэтому в тестах HttpContext обязан содержать аутентифицированного пользователя.
+    private static DefaultHttpContext AuthenticatedContext(Guid userId, string role = "Employee")
+    {
+        var identity = new ClaimsIdentity(
+            new[]
+            {
+                new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+                new Claim(ClaimTypes.Role, role)
+            },
+            authenticationType: "Test");
+
+        var http = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(identity)
+        };
+
+        return http;
     }
 
     [Fact]
@@ -61,10 +83,10 @@ public class SyncTests
         var idemp = new DbIdempotencyService(ctx);
 
         var bulk = new WorkTime.Server.Services.BulkUpsertService(ctx);
-        var controller = new WorkEventsController(ctx, idemp, bulk);
+        var controller = new WorkEventsController(ctx, idemp, bulk, NullLogger<WorkEventsController>.Instance);
         controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext
         {
-            HttpContext = new DefaultHttpContext()
+            HttpContext = AuthenticatedContext(user.Id)
         };
 
         var batch = new[] { existing, newEvent };
@@ -104,8 +126,8 @@ public class SyncTests
         var idemp = new DbIdempotencyService(ctx);
 
         var bulk2 = new WorkTime.Server.Services.BulkUpsertService(ctx);
-        var controller = new WorkEventsController(ctx, idemp, bulk2);
-        var http = new DefaultHttpContext();
+        var controller = new WorkEventsController(ctx, idemp, bulk2, NullLogger<WorkEventsController>.Instance);
+        var http = AuthenticatedContext(user.Id);
         http.Request.Headers["Idempotency-Key"] = "key-123";
         controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext
         {

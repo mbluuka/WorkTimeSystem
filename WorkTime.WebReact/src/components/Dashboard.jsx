@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { api, getCurrentUser } from '../api'
 import { createEvent, getOutbox, syncOutbox, updateOutboxEvent, deleteOutboxEvent } from '../pwaClient'
 
@@ -55,6 +55,34 @@ const STATUS_CONFIG = {
   done:   { text: 'День завершён',     color: '#0d6efd', bg: '#d1ecf1' }
 }
 
+function getStatusKey(allEvents) {
+  if (!allEvents?.length) return 'idle'
+  const sorted = [...allEvents].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+  const last = sorted[sorted.length - 1]
+  switch (last.type) {
+    case 'StartWork':  return 'working'
+    case 'StartBreak': return 'break'
+    case 'EndBreak':   return 'working'
+    case 'EndWork':    return 'done'
+    default:           return 'idle'
+  }
+}
+
+// Актуальный StartWork: последний, после которого не было EndWork.
+function getLastStartWorkEvent(allEvents) {
+  if (!allEvents?.length) return null
+  const sorted = [...allEvents].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+  for (const ev of sorted) {
+    if (ev.type === 'StartWork') {
+      const afterEndWork = sorted.find(e =>
+        e.type === 'EndWork' && new Date(e.timestamp) > new Date(ev.timestamp)
+      )
+      if (!afterEndWork) return ev
+    }
+  }
+  return null
+}
+
 // ============================================================
 // Модальное окно
 // ============================================================
@@ -80,7 +108,6 @@ function Modal({ isOpen, onClose, title, children }) {
 
 export default function Dashboard({ onLogout }) {
   const user = getCurrentUser()
-  const [status, setStatus] = useState('idle')
   const [outbox, setOutbox] = useState([])
   const [events, setEvents] = useState([])
   const [summary, setSummary] = useState(null)
@@ -98,8 +125,6 @@ export default function Dashboard({ onLogout }) {
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('deviceId') || '')
   const [clearOutboxConfirm, setClearOutboxConfirm] = useState(false)
   const elapsedRef = useRef(null)
-  const statusRef = useRef(status)
-  statusRef.current = status
 
   // ---------- Загрузка данных ----------
 
@@ -117,38 +142,70 @@ export default function Dashboard({ onLogout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ---------- Производные данные ----------
+  // Статус вычисляется из данных, а не хранится в state: любое изменение
+  // outbox или серверных событий мгновенно перекрашивает интерфейс,
+  // без гонок между setOutbox/setEvents и ручным setStatus.
+
+  // Источники имеют разный регистр полей: IndexedDB хранит PascalCase
+  // (Id/Type/Timestamp), серверный DTO приходит в camelCase.
+  const allEvents = useMemo(() => {
+    const merged = new Map()
+
+    for (const o of outbox) {
+      merged.set(o.Id, {
+        id: o.Id,
+        type: o.Type,
+        timestamp: o.Timestamp,
+        projectId: o.ProjectId ?? null,
+        serverOrder: null,
+        pending: true
+      })
+    }
+
+    // Серверная копия важнее локальной: событие уже прошло валидацию
+    // и попало в outbox-очередь раньше, чем синхронизировалось.
+    for (const e of events) {
+      merged.set(e.id, { ...e, pending: false })
+    }
+
+    return [...merged.values()]
+  }, [outbox, events])
+
+  const statusKey = useMemo(() => getStatusKey(allEvents), [allEvents])
+  const statusConfig = STATUS_CONFIG[statusKey]
+
+  const filteredEvents = useMemo(() => {
+    const cutoff = new Date()
+    if (period === 'day') cutoff.setDate(cutoff.getDate() - 1)
+    else if (period === 'week') cutoff.setDate(cutoff.getDate() - 7)
+    else cutoff.setMonth(cutoff.getMonth() - 1)
+
+    return allEvents
+      .filter(e => new Date(e.timestamp) >= cutoff)
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+  }, [allEvents, period])
+
   // ---------- Живой таймер ----------
 
   useEffect(() => {
-    if (statusRef.current !== 'working') {
+    if (statusKey !== 'working') {
       setElapsed(0)
       return
     }
-    const lastStart = getLastStartWorkEvent()
+    const lastStart = getLastStartWorkEvent(allEvents)
     if (!lastStart) { setElapsed(0); return }
-    setElapsed(Date.now() - new Date(lastStart.timestamp).getTime())
+
+    const startedAt = new Date(lastStart.timestamp).getTime()
+    setElapsed(Date.now() - startedAt)
+
     if (elapsedRef.current) clearInterval(elapsedRef.current)
     elapsedRef.current = setInterval(() => {
-      const now = new Date(lastStart.timestamp)
-      setElapsed(Date.now() - now.getTime())
+      setElapsed(Date.now() - startedAt)
     }, 1000)
-    return () => { if (elapsedRef.current) clearInterval(elapsedRef.current) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status])
 
-  function getLastStartWorkEvent() {
-    const sorted = [...events].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-    for (const ev of sorted) {
-      if (ev.type === 'StartWork') {
-        // Проверяем, что после StartWork не было EndWork
-        const afterEndWork = sorted.find(e =>
-          e.type === 'EndWork' && new Date(e.timestamp) > new Date(ev.timestamp)
-        )
-        if (!afterEndWork) return ev
-      }
-    }
-    return null
-  }
+    return () => { if (elapsedRef.current) clearInterval(elapsedRef.current) }
+  }, [statusKey, allEvents])
 
   // ---------- Device ----------
 
@@ -173,7 +230,6 @@ export default function Dashboard({ onLogout }) {
     try {
       const data = await api.getEvents()
       setEvents(data || [])
-      updateStatus(data || [])
     } catch (e) { setError('Ошибка загрузки событий: ' + e.message) }
   }
 
@@ -185,21 +241,6 @@ export default function Dashboard({ onLogout }) {
       const s = await api.getSummary(user.id, from.toISOString(), now.toISOString())
       setSummary(s)
     } catch (e) { setError('Ошибка загрузки отчёта: ' + e.message) }
-  }
-
-  // ---------- Статус ----------
-
-  function updateStatus(evts) {
-    const sorted = [...evts].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-    const last = sorted[sorted.length - 1]
-    if (!last) { setStatus('idle'); return }
-    switch (last.type) {
-      case 'StartWork':  setStatus('working'); break
-      case 'StartBreak': setStatus('break'); break
-      case 'EndBreak':   setStatus('working'); break
-      case 'EndWork':    setStatus('done'); break
-      default:           setStatus('idle')
-    }
   }
 
   // ---------- Действия ----------
@@ -216,10 +257,18 @@ export default function Dashboard({ onLogout }) {
         projectId: selectedProjectId || null
       }
       const ev = await createEvent(payload)
-      // Не синхронизируем автоматически — событие попадёт в outbox
-      // и будет отправлено при нажатии «Синхронизировать»
+
+      // МГНОВЕННО обновляем outbox (setOutbox — синхронный setState)
       await loadOutbox()
-      await loadEvents()
+
+      // Синхронизация с сервером в фоне
+      try {
+        await syncOutbox({ apiBase: '' })
+        await loadOutbox()
+        await loadEvents()
+        await loadSummary()
+      } catch { /* offline — останется в outbox */ }
+
       setSelectedProjectId(null)
       setShowProjectPicker(false)
     } catch (e) { setError('Ошибка: ' + e.message) }
@@ -250,7 +299,6 @@ export default function Dashboard({ onLogout }) {
     } finally {
       setLoading(false)
       setSyncing(false)
-      // Убираем сообщение через 5 секунд
       setTimeout(() => setSyncMessage(''), 5000)
     }
   }
@@ -271,22 +319,12 @@ export default function Dashboard({ onLogout }) {
     finally { setLoading(false) }
   }
 
-  async function handleDeleteOutboxItem(id) {
-    setLoading(true)
-    try {
-      await deleteOutboxEvent(id)
-      await loadOutbox()
-    } catch (e) { setError('Ошибка: ' + e.message) }
-    finally { setLoading(false) }
-  }
-
   // ---------- Редактирование события (FR7) ----------
 
   async function handleUpdateEvent(ev) {
     setLoading(true)
     setError('')
     try {
-      // Если событие ещё в outbox — редактируем локально
       const outboxItem = outbox.find(o => o.Id === ev.id)
       if (outboxItem) {
         const updated = { ...outboxItem, Type: ev.type, Timestamp: ev.timestamp, ProjectId: ev.projectId || null }
@@ -320,20 +358,6 @@ export default function Dashboard({ onLogout }) {
     finally { setLoading(false) }
   }
 
-  // ---------- Фильтрация событий по периоду ----------
-
-  function getFilteredEvents() {
-    const now = new Date()
-    const cutoff = new Date(now)
-    if (period === 'day') cutoff.setDate(now.getDate() - 1)
-    else if (period === 'week') cutoff.setDate(now.getDate() - 7)
-    else cutoff.setMonth(now.getMonth() - 1)
-
-    return events.filter(e => new Date(e.timestamp) >= cutoff).sort(
-      (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
-    )
-  }
-
   // ---------- Проект ----------
 
   function getProjectName(id) {
@@ -341,12 +365,10 @@ export default function Dashboard({ onLogout }) {
     return projects.find(p => p.id === id)?.name || null
   }
 
-  // ---------- Состояния ----------
+  // ---------- Рендер ----------
 
-  const st = STATUS_CONFIG[status]
-  const filtered = getFilteredEvents()
-  const progressPct = Math.min(100, Math.round((summary?.totalWorkMinutes || 0) / 480 * 100))
   const syncCount = outbox.length
+  const progressPct = Math.min(100, Math.round((summary?.totalWorkMinutes || 0) / 480 * 100))
 
   return (
     <div className="dashboard">
@@ -373,11 +395,11 @@ export default function Dashboard({ onLogout }) {
         {/* ===== Карточка статуса ===== */}
         <div className="status-card">
           <div className="status-header">
-            <div className={`status-badge ${st.bg}`} style={{ borderColor: st.color }}>
-              <span className="status-dot" style={{ background: st.color }}></span>
-              {st.text}
+            <div className={`status-badge ${statusConfig.bg}`} style={{ borderColor: statusConfig.color }}>
+              <span className="status-dot" style={{ background: statusConfig.color }}></span>
+              {statusConfig.text}
             </div>
-            {status === 'working' && (
+            {statusKey === 'working' && (
               <div className="timer-display">{formatDuration(elapsed)}</div>
             )}
           </div>
@@ -409,28 +431,28 @@ export default function Dashboard({ onLogout }) {
             <button
               className="btn btn-success btn-lg"
               onClick={() => { setShowProjectPicker(true); setSelectedProjectId(null) }}
-              disabled={loading || status === 'working' || status === 'break'}
+              disabled={loading || statusKey === 'working' || statusKey === 'break'}
             >
               ▶ Начать день
             </button>
             <button
               className="btn btn-warning btn-lg"
               onClick={() => handleAction('StartBreak')}
-              disabled={loading || status !== 'working'}
+              disabled={loading || statusKey !== 'working'}
             >
               ⏸ Перерыв
             </button>
             <button
               className="btn btn-info btn-lg"
               onClick={() => handleAction('EndBreak')}
-              disabled={loading || status !== 'break'}
+              disabled={loading || statusKey !== 'break'}
             >
               ▶ Вернуться
             </button>
             <button
               className="btn btn-danger btn-lg"
               onClick={() => handleAction('EndWork')}
-              disabled={loading || status === 'idle' || status === 'done'}
+              disabled={loading || statusKey === 'idle' || statusKey === 'done'}
             >
               ■ Закончить
             </button>
@@ -495,7 +517,7 @@ export default function Dashboard({ onLogout }) {
             </div>
           </div>
 
-          {filtered.length === 0 && <p className="empty">Нет записей за этот период</p>}
+          {filteredEvents.length === 0 && <p className="empty">Нет записей за этот период</p>}
 
           <table className="table">
             <thead>
@@ -508,7 +530,7 @@ export default function Dashboard({ onLogout }) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(ev => (
+              {filteredEvents.map(ev => (
                 <tr key={ev.id}>
                   <td>
                     {formatDateRu(ev.timestamp)} {formatTimeRu(ev.timestamp)}
@@ -648,7 +670,7 @@ export default function Dashboard({ onLogout }) {
       <Modal isOpen={clearOutboxConfirm} onClose={() => setClearOutboxConfirm(false)} title="Очистить очередь синхронизации?">
         <p>
           Из локальной очереди будут удалены все {syncCount} записей. Они <b>не будут отправлены</b> на сервер.
-          Используйте, если записии зависли и не синхронизируются.
+          Используйте, если записи зависли и не синхронизируются.
         </p>
         <div className="modal-actions">
           <button className="btn btn-small" onClick={() => setClearOutboxConfirm(false)}>Отмена</button>

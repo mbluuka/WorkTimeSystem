@@ -8,9 +8,37 @@ services:
       POSTGRES_USER: worktime
       POSTGRES_PASSWORD: worktime_dev_password
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - worktime_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U worktime -d worktime"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  server:
+    build:
+      context: .
+      dockerfile: WorkTime.Server/Dockerfile
+    container_name: worktime-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Docker
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__WorkTimeDatabase: "Host=worktime-postgres;Port=5432;Database=worktime;Username=worktime;Password=worktime_dev_password"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
 
 volumes:
   worktime_postgres_data:

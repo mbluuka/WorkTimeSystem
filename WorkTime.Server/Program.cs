@@ -40,7 +40,14 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        // WorkEventType отдаётся и принимается строками ("StartWork"),
+        // иначе фронтенд сравнивает числовые значения enum со строками и ломается
+        options.JsonSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter());
+    });
 
 // Authentication & Authorization (JWT)
 builder.Services.AddAuthentication(options =>
@@ -100,18 +107,25 @@ app.UseAuthorization();
 // Idempotency middleware: caches responses for requests with Idempotency-Key header
 app.UseMiddleware<WorkTime.Server.Middleware.IdempotencyMiddleware>();
 
-// Serve React PWA static files if built
-var reactDist = Path.Combine(builder.Environment.ContentRootPath, "WorkTime.WebReact", "dist");
-if (Directory.Exists(reactDist))
+// Serve React PWA static files
+// В продакшене (Docker) — wwwroot уже лежит в ContentRoot/wwwroot
+// В разработке — ищем dist в соседней папке WorkTime.WebReact/dist
+var wwwrootPath = Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
+if (!Directory.Exists(wwwrootPath))
+{
+    wwwrootPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "WorkTime.WebReact", "dist"));
+}
+
+if (Directory.Exists(wwwrootPath))
 {
     app.UseDefaultFiles(new DefaultFilesOptions
     {
-        FileProvider = new PhysicalFileProvider(reactDist),
+        FileProvider = new PhysicalFileProvider(wwwrootPath),
         DefaultFileNames = new List<string> { "index.html" }
     });
     app.UseStaticFiles(new StaticFileOptions
     {
-        FileProvider = new PhysicalFileProvider(reactDist),
+        FileProvider = new PhysicalFileProvider(wwwrootPath),
         RequestPath = ""
     });
 }
@@ -135,29 +149,8 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast")
-.WithOpenApi();
-
 app.Run();
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+// Точка входа из top-level statements внутренняя;
+// объявление делает её доступной для WebApplicationFactory в интеграционных тестах.
+public partial class Program { }

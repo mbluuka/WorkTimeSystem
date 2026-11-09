@@ -102,6 +102,21 @@ public class WorkEventsController : ControllerBase
             });
         }
 
+        // Validate project if specified
+        if (workEvent.ProjectId.HasValue)
+        {
+            var projectExists = await _dbContext.Projects
+                .AnyAsync(p => p.Id == workEvent.ProjectId);
+
+            if (!projectExists)
+            {
+                return BadRequest(new
+                {
+                    message = "Project does not exist."
+                });
+            }
+        }
+
         // If the event already exists, make the operation idempotent.
         if (workEvent.Id != Guid.Empty)
         {
@@ -250,6 +265,100 @@ public class WorkEventsController : ControllerBase
             .ToListAsync();
 
         return Ok(events.Select(ToResponse));
+    }
+
+    // ============================================================
+    // UPDATE
+    // ============================================================
+
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<WorkEventResponse>> Update(
+        Guid id,
+        [FromBody] UpdateWorkEventRequest req)
+    {
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        var workEvent = await _dbContext.WorkEvents
+            .FirstOrDefaultAsync(x => x.Id == id);
+
+        if (workEvent is null)
+        {
+            return NotFound(new
+            {
+                message = "Work event not found."
+            });
+        }
+
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                workEvent.UserId))
+        {
+            return Forbid();
+        }
+
+        // Validate project if specified
+        if (req.ProjectId.HasValue)
+        {
+            var projectExists = await _dbContext.Projects
+                .AnyAsync(p => p.Id == req.ProjectId);
+
+            if (!projectExists)
+            {
+                return BadRequest(new
+                {
+                    message = "Project does not exist."
+                });
+            }
+        }
+
+        workEvent.Type = req.Type;
+        workEvent.Timestamp = EnsureUtc(req.Timestamp);
+        workEvent.ProjectId = req.ProjectId;
+
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(ToResponse(workEvent));
+    }
+
+    // ============================================================
+    // DELETE
+    // ============================================================
+
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+        {
+            return Unauthorized();
+        }
+
+        var workEvent = await _dbContext.WorkEvents
+            .FirstOrDefaultAsync(x => x.Id == id);
+
+        if (workEvent is null)
+        {
+            return NotFound(new
+            {
+                message = "Work event not found."
+            });
+        }
+
+        if (!CanAccessUserData(
+                currentUserId,
+                currentRole,
+                workEvent.UserId))
+        {
+            return Forbid();
+        }
+
+        _dbContext.WorkEvents.Remove(workEvent);
+        await _dbContext.SaveChangesAsync();
+
+        return NoContent();
     }
 
     // ============================================================
@@ -421,6 +530,23 @@ public class WorkEventsController : ControllerBase
             .Where(x => deviceIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id);
 
+        // --------------------------------------------------------
+        // Load projects (ProjectId is optional, but must exist)
+        // --------------------------------------------------------
+
+        var projectIds = list
+            .Where(x => x.ProjectId.HasValue)
+            .Select(x => x.ProjectId!.Value)
+            .Distinct()
+            .ToList();
+
+        var projects = projectIds.Count == 0
+            ? new Dictionary<Guid, Project>()
+            : await _dbContext.Projects
+                .AsNoTracking()
+                .Where(x => projectIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id);
+
         var results = new List<SyncResult>();
         var toUpsert = new List<WorkEvent>();
 
@@ -490,6 +616,18 @@ public class WorkEventsController : ControllerBase
                     Id = ev.Id,
                     Status = SyncResultStatus.Invalid,
                     Message = "Device does not belong to user."
+                });
+
+                continue;
+            }
+
+            if (ev.ProjectId.HasValue && !projects.ContainsKey(ev.ProjectId.Value))
+            {
+                results.Add(new SyncResult
+                {
+                    Id = ev.Id,
+                    Status = SyncResultStatus.Invalid,
+                    Message = "Project does not exist."
                 });
 
                 continue;
@@ -770,7 +908,8 @@ public class WorkEventsController : ControllerBase
             CreatedAt = workEvent.CreatedAt,
             SyncedAt = workEvent.SyncedAt,
             ServerReceivedAt = workEvent.ServerReceivedAt,
-            ServerOrder = workEvent.ServerOrder
+            ServerOrder = workEvent.ServerOrder,
+            ProjectId = workEvent.ProjectId
         };
     }
 

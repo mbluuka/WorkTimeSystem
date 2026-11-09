@@ -34,7 +34,7 @@ Local-first система учёта рабочего времени с офл�
 | Консольный клиент | C# / .NET 8 / SQLite (EF Core) |
 | Экспорт PDF | QuestPDF |
 | Экспорт XLSX | ClosedXML |
-| Контейнеризация | Docker Compose (PostgreSQL) |
+| Контейнеризация | Docker Compose (PostgreSQL + сервер + PWA) |
 
 ## Ролевая модель
 
@@ -44,15 +44,73 @@ Local-first система учёта рабочего времени с офл�
 | **Manager** | Все возможности Employee + просмотр команды, сводные отчёты, экспорт PDF/XLSX |
 | **Admin** | Все возможности Manager + управление пользователями (CRUD, блокировка), проекты, аудит-логи |
 
-## Запуск
+---
+
+## Быстрый старт
+
+### Способ 1: Docker (рекомендуемый)
+
+Один контейнер = API + React PWA. База данных — отдельный контейнер PostgreSQL.
+
+```bash
+docker compose up --build
+```
+
+Сервер будет доступен на **http://localhost:8080** (Swagger: `/swagger`).
+
+При первом запуске автоматически:
+- Применяются миграции EF Core
+- Создаются seed-пользователи:
+  - **Админ:** `admin@worktime.local` / `Admin@123`
+  - **Сотрудник:** `employee@worktime.local` / `Employee@123`
+
+Остановить всё:
+```bash
+docker compose down
+```
+
+### Способ 2: Локальная разработка (PowerShell / Bash)
+
+**Требования:** Docker Desktop, .NET 8 SDK, Node 18+
+
+#### Windows (PowerShell)
+```powershell
+.\start-dev.ps1
+```
+
+#### Linux / macOS (Bash)
+```bash
+chmod +x start-dev.sh
+./start-dev.sh
+```
+
+Запускает параллельно:
+- PostgreSQL через `docker compose up -d postgres`
+- .NET сервер (горячая перезагрузка)
+- Vite dev-сервер с проксированием `/api` на сервер
+
+Сервисы доступны на:
+| Сервис | URL |
+|--------|-----|
+| React PWA | http://localhost:5173 |
+| .NET Server | http://localhost:5114 |
+| Swagger | http://localhost:5114/swagger |
+| PostgreSQL | localhost:15432 |
+
+Остановка: `Ctrl+C` — скрипт аккуратно остановит все сервисы.
+
+---
+
+## Ручной запуск (покомпонентно)
 
 ### 1. PostgreSQL через Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d postgres
 ```
 
-База данных будет доступна на `localhost:5432`:
+База данных:
+- Хост: `localhost:15432`
 - БД: `worktime`
 - Пользователь: `worktime`
 - Пароль: `worktime_dev_password`
@@ -64,24 +122,20 @@ cd WorkTime.Server
 dotnet run
 ```
 
-Сервер запускается на `https://localhost:5114` (Swagger: `/swagger`).
+Сервер запускается на `https://localhost:7132` / `http://localhost:5114`.
 
-При первом запуске автоматически:
-- Применяются миграции EF Core
-- Создаются seed-пользователи:
-  - **Админ:** `admin@worktime.local` / `Admin@123`
-  - **Сотрудник:** `employee@worktime.local` / `Employee@123`
+При первом запуске автоматически применяются миграции EF Core и создаются seed-пользователи.
 
 ### 3. Веб-клиент (React PWA)
 
 ```bash
 cd WorkTime.WebReact
 npm install
-npm run dev      # режим разработки
+npm run dev      # режим разработки (http://localhost:5173)
 npm run build    # сборка в dist/
 ```
 
-Сервер автоматически раздаёт собранную PWA из `WorkTime.WebReact/dist/`.
+Сервер автоматически раздаёт собранную PWA из `WorkTime.WebReact/dist/` (при наличии папки).
 
 ### 4. Консольный клиент
 
@@ -91,6 +145,8 @@ dotnet run
 ```
 
 При запуске потребуется ввести email и пароль (используйте seed-учётные данные).
+
+---
 
 ## API Endpoints
 
@@ -181,7 +237,8 @@ WorkTimeSystem/
 │   ├── Services/                 # SyncQueueProcessor, BulkUpsert, Idempotency, DbSeeder
 │   ├── Middleware/               # IdempotencyMiddleware
 │   ├── Data/                     # WorkTimeDbContext
-│   └── Migrations/               # EF Core миграции
+│   ├── Migrations/               # EF Core миграции
+│   └── Dockerfile                # Контейнер образа сервера
 ├── WorkTime.Client/              # Консольный клиент (C#, SQLite)
 │   ├── Models/                   # LocalWorkEvent
 │   ├── Services/                 # SyncService
@@ -192,7 +249,10 @@ WorkTimeSystem/
 │       ├── components/           # Login, Dashboard, ManagerView, AdminView
 │       ├── api.js                # API-клиент с JWT
 │       └── pwaClient.js          # Мост к SDK
-└── docker-compose.yml            # PostgreSQL
+├── docker-compose.yml            # Docker: PostgreSQL + сервер
+├── start-dev.ps1                 # Windows: локальный запуск всех сервисов
+├── start-dev.sh                  # Linux/macOS: локальный запуск всех сервисов
+└── .dockerignore                 # Игнор для docker build
 ```
 
 ## Тестирование

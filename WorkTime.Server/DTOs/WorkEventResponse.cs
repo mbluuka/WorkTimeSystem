@@ -19,4 +19,7 @@ public class WorkEventResponse
     public DateTime? SyncedAt { get; set; }
     public DateTime? ServerReceivedAt { get; set; }
     public long? ServerOrder { get; set; }
+
+    // Проект, к которому относится событие
+    public Guid? ProjectId { get; set; }
 }

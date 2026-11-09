@@ -28,4 +28,9 @@ public class WorkEvent
     public User? User { get; set; }
 
     public Device? Device { get; set; }
+
+    // Проект, к которому относится событие (опционально)
+    public Guid? ProjectId { get; set; }
+
+    public Project? Project { get; set; }
 }

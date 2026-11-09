@@ -4,7 +4,8 @@ import {
   getOutbox as sdkGetOutbox,
   syncOutbox as sdkSyncOutbox,
   updateOutboxEvent as sdkUpdateOutboxEvent,
-  deleteOutboxEvent as sdkDeleteOutboxEvent
+  deleteOutboxEvent as sdkDeleteOutboxEvent,
+  clearOutbox as sdkClearOutbox
 } from '../../WorkTime.ClientSdk/pwa-client.js';
 import { getToken } from './api';
 
@@ -14,6 +15,10 @@ export async function createEvent(params){
 
 export async function getOutbox(){
   return sdkGetOutbox();
+}
+
+export async function clearOutbox(ids){
+  return sdkClearOutbox(ids);
 }
 
 // Корректировка события, которое ещё не ушло на сервер (офлайн-очередь).

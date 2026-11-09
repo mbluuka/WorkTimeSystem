@@ -317,6 +317,9 @@ namespace WorkTime.Server.Migrations
                     b.Property<long>("DeviceSeq")
                         .HasColumnType("bigint");
 
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid");
+
                     b.Property<long?>("ServerOrder")
                         .HasColumnType("bigint");
 
@@ -336,6 +339,8 @@ namespace WorkTime.Server.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ProjectId");
 
                     b.HasIndex("DeviceId", "Timestamp");
 
@@ -414,6 +419,10 @@ namespace WorkTime.Server.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("WorkTime.Server.Models.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId");
+
                     b.HasOne("WorkTime.Server.Models.User", "User")
                         .WithMany("WorkEvents")
                         .HasForeignKey("UserId")
@@ -421,6 +430,8 @@ namespace WorkTime.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Device");
+
+                    b.Navigation("Project");
 
                     b.Navigation("User");
                 });

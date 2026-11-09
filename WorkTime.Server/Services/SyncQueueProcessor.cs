@@ -19,6 +19,15 @@ public class SyncQueueOptions
 
 public class SyncQueueProcessor : BackgroundService
 {
+    // Клиенты (PWA SDK, консольный клиент) присылают Data в PascalCase и Type строкой,
+    // поэтому десериализация должна быть нечувствительна к регистру и понимать строковые enum.
+    internal static readonly JsonSerializerOptions PayloadJsonOptions =
+        new(JsonSerializerDefaults.Web)
+        {
+            PropertyNameCaseInsensitive = true,
+            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+        };
+
     private readonly IServiceProvider _provider;
     private readonly ILogger<SyncQueueProcessor> _logger;
     private readonly SyncQueueOptions _options;
@@ -194,7 +203,8 @@ public class SyncQueueProcessor : BackgroundService
 
             var workEvent =
                 JsonSerializer.Deserialize<WorkEvent>(
-                    entry.Data);
+                    entry.Data,
+                    PayloadJsonOptions);
 
             if (workEvent == null)
             {
@@ -268,7 +278,8 @@ public class SyncQueueProcessor : BackgroundService
 
             var timeEntry =
                 JsonSerializer.Deserialize<TimeEntry>(
-                    entry.Data);
+                    entry.Data,
+                    PayloadJsonOptions);
 
             if (timeEntry == null)
             {

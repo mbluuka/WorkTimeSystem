@@ -73,9 +73,25 @@ public class DevicesController : ControllerBase
         if (!userExists)
             return BadRequest(new { message = "User does not exist." });
 
+        // Клиент может прислать собственный Id, чтобы офлайн-события,
+        // созданные до регистрации устройства, позже прошли FK-проверку.
+        var deviceId = req.Id == Guid.Empty ? Guid.NewGuid() : req.Id;
+
+        var existing = await _dbContext.Devices
+            .AsNoTracking()
+            .FirstOrDefaultAsync(d => d.Id == deviceId);
+
+        if (existing is not null)
+        {
+            if (existing.UserId != req.UserId)
+                return Conflict(new { message = "Device already belongs to another user." });
+
+            return Ok(ToResponse(existing));
+        }
+
         var device = new Device
         {
-            Id = Guid.NewGuid(),
+            Id = deviceId,
             UserId = req.UserId,
             Name = req.Name ?? "Unknown device",
             Platform = req.Platform ?? "Unknown",
@@ -135,6 +151,7 @@ public class DevicesController : ControllerBase
 
 public class CreateDeviceRequest
 {
+    public Guid Id { get; set; }
     public Guid UserId { get; set; }
     public string? Name { get; set; }
     public string? Platform { get; set; }

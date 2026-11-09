@@ -1,0 +1,28 @@
+.git
+.gitignore
+.gitattributes
+.github
+.vs
+.idea
+*.md
+
+# .NET
+**/bin/
+**/obj/
+**/.dotnet/
+artifacts/
+
+# Node / Vite: сборка выполняется на отдельной стадии образа
+**/node_modules/
+**/dist/
+
+# Тестовые проекты в образ сервера не входят
+WorkTime.Server.Tests/
+WorkTime.Server.IntegrationTests/
+
+# Локальные данные и настройки
+*.db
+*.db-shm
+*.db-wal
+.env
+*.local

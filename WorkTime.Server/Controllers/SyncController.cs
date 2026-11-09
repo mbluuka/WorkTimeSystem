@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using WorkTime.Server.Data;
 using WorkTime.Server.DTOs;
 using WorkTime.Server.Models;
+using WorkTime.Server.Services;
 
 namespace WorkTime.Server.Controllers;
 
@@ -15,10 +16,12 @@ namespace WorkTime.Server.Controllers;
 public class SyncController : ControllerBase
 {
     private readonly WorkTimeDbContext _dbContext;
+    private readonly ILogger<SyncController> _logger;
 
-    public SyncController(WorkTimeDbContext dbContext)
+    public SyncController(WorkTimeDbContext dbContext, ILogger<SyncController> logger)
     {
         _dbContext = dbContext;
+        _logger = logger;
     }
 
     [HttpPost("operations")]
@@ -252,6 +255,129 @@ public class SyncController : ControllerBase
 
         await _dbContext.SaveChangesAsync();
 
+        // Немедленно обрабатываем принятые операции (create/update/delete),
+        // чтобы клиент увидел результат сразу, а не ждал фоновый процессор.
+        await ProcessSyncQueueAsync(_dbContext, results.Select(r => r.Id).ToList());
+
         return Ok(results);
+    }
+
+    /// <summary>
+    /// Немедленная обработка операций синхронизации из очереди.
+    /// Вызывается после PostOperations для мгновенного применения событий.
+    /// </summary>
+    private async Task ProcessSyncQueueAsync(WorkTimeDbContext db, List<Guid> operationIds)
+    {
+        var entries = await db.SyncQueue
+            .Where(e => operationIds.Contains(e.Id) && e.ProcessedAt == null)
+            .OrderBy(e => e.CreatedAt)
+            .ToListAsync();
+
+        if (!entries.Any())
+            return;
+
+        foreach (var entry in entries)
+        {
+            try
+            {
+                entry.Attempts++;
+
+                switch (entry.EntityType.ToLowerInvariant())
+                {
+                    case "workevent":
+                        if (entry.Operation.Equals("create", StringComparison.OrdinalIgnoreCase) ||
+                            entry.Operation.Equals("update", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (string.IsNullOrWhiteSpace(entry.Data))
+                                throw new InvalidOperationException("WorkEvent data is empty");
+
+                            var workEvent = System.Text.Json.JsonSerializer.Deserialize<WorkEvent>(
+                                entry.Data, SyncQueueProcessor.PayloadJsonOptions);
+
+                            if (workEvent == null)
+                                throw new InvalidOperationException("Failed to deserialize WorkEvent");
+
+                            if (workEvent.Id != entry.EntityId)
+                                throw new InvalidOperationException("WorkEvent Id mismatch");
+
+                            if (workEvent.UserId != entry.UserId)
+                                throw new InvalidOperationException("WorkEvent UserId mismatch");
+
+                            workEvent.ServerReceivedAt = DateTime.UtcNow;
+
+                            var existing = await db.WorkEvents.FindAsync(new object[] { workEvent.Id });
+                            if (existing != null)
+                            {
+                                existing.Type = workEvent.Type;
+                                existing.Timestamp = workEvent.Timestamp;
+                                existing.DeviceId = workEvent.DeviceId;
+                                existing.ProjectId = workEvent.ProjectId;
+                            }
+                            else
+                            {
+                                db.WorkEvents.Add(workEvent);
+                            }
+                        }
+                        else if (entry.Operation.Equals("delete", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var workEvent = await db.WorkEvents.FindAsync(new object[] { entry.EntityId });
+                            if (workEvent != null)
+                                db.WorkEvents.Remove(workEvent);
+                        }
+                        break;
+
+                    case "timeentry":
+                        if (entry.Operation.Equals("create", StringComparison.OrdinalIgnoreCase) ||
+                            entry.Operation.Equals("update", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (string.IsNullOrWhiteSpace(entry.Data))
+                                throw new InvalidOperationException("TimeEntry data is empty");
+
+                            var timeEntry = System.Text.Json.JsonSerializer.Deserialize<TimeEntry>(
+                                entry.Data, SyncQueueProcessor.PayloadJsonOptions);
+
+                            if (timeEntry == null)
+                                throw new InvalidOperationException("Failed to deserialize TimeEntry");
+
+                            if (timeEntry.Id != entry.EntityId)
+                                throw new InvalidOperationException("TimeEntry Id mismatch");
+
+                            if (timeEntry.UserId != entry.UserId)
+                                throw new InvalidOperationException("TimeEntry UserId mismatch");
+
+                            var existing = await db.TimeEntries.FindAsync(new object[] { timeEntry.Id });
+                            if (existing == null)
+                            {
+                                timeEntry.CreatedAt = timeEntry.CreatedAt == default ? DateTime.UtcNow : timeEntry.CreatedAt;
+                                db.TimeEntries.Add(timeEntry);
+                            }
+                            else
+                            {
+                                existing.Start = timeEntry.Start;
+                                existing.End = timeEntry.End;
+                            }
+                        }
+                        else if (entry.Operation.Equals("delete", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var timeEntry = await db.TimeEntries.FindAsync(new object[] { entry.EntityId });
+                            if (timeEntry != null)
+                                db.TimeEntries.Remove(timeEntry);
+                        }
+                        break;
+                }
+
+                entry.ProcessedAt = DateTime.UtcNow;
+                entry.Result = "Applied";
+                entry.NextRetry = null;
+            }
+            catch (Exception ex)
+            {
+                entry.Result = ex.Message;
+                entry.NextRetry = DateTime.UtcNow.AddSeconds(30);
+                // Не бросаем — фоновый процессор повторит попытку
+            }
+        }
+
+        await db.SaveChangesAsync();
     }
 }
