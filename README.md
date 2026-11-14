@@ -170,6 +170,80 @@ Linux и не зависит от генераторов имён Avalonia.
 
 ---
 
+## Публикация для RED OS (Linux x64)
+
+Десктоп-клиент собирается из Windows и копируется на RED OS — устанавливать
+.NET SDK на целевой машине **не нужно** (self-contained публикация включает
+все зависимости, включая `libSkiaSharp.so`, `libe_sqlite3.so`, `libcoreclr.so`).
+
+### Шаг 1. Требования на Windows
+
+- .NET 8 SDK (любой источник, даже 11.0 — кросс-публикация работает из SDK 11)
+- Командная строка (PowerShell / bash)
+
+### Шаг 2. Публикация
+
+```powershell
+cd WorkTime.Desktop
+dotnet publish -c Release -r linux-x64 --self-contained true -o ..\Desktop-RED-OS
+```
+
+Через 1-2 минуты в папке `Desktop-RED-OS` появится полный набор файлов (~100 МБ).
+
+### Шаг 3. Копирование на RED OS
+
+Скопируйте папку `Desktop-RED-OS` на RED OS любым способом (флешка, SCP,
+Git-репозиторий). Пример через SCP:
+
+```bash
+# С Windows (PowerShell):
+scp -r Desktop-RED-OS user@red-os-ip:/home/user/WorkTime-Desktop
+
+# С Windows (WinSCP / FileZilla):
+# скопировать папку Desktop-RED-OS в /home/user/WorkTime-Desktop
+```
+
+### Шаг 4. Настройка прав на RED OS
+
+```bash
+ssh user@red-os-ip
+chmod +x WorkTime-Desktop/WorkTime.Desktop
+```
+
+### Шаг 5. Системные зависимости RED OS
+
+На RED OS (как и на любом Linux) при первом запуске могут потребоваться
+базовые X11/Wayland-библиотеки:
+
+```bash
+# Если пакетный менеджер `apt`:
+sudo apt update
+sudo apt install -y libx11-6 libxcomposite1 libxcursor1 libxdamage1 \
+    libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
+    libasound2 libnss3 libdbus-1-3 libdrm2 libwayland-client0 libxkbcommon0
+
+# Если используется `yum`/`dnf`:
+sudo dnf install -y libX11 libXcomposite libXcursor libXdamage libXfixes \
+    libXi libXrandr libXScrnSaver libXtst alsa-lib nss dbus-libs \
+    libdrm wayland libxkbcommon
+```
+
+> **Примечание:** на RED OS 1.8+ (с GUI-окружением) эти библиотеки обычно уже
+> присутствуют — если при запуске появляется окно с ошибкой «Не удалось
+> загрузить libSkiaSharp.so», проверьте наличие `libX11` и `libglvnd`.
+
+### Шаг 6. Запуск
+
+```bash
+cd /home/user/WorkTime-Desktop
+./WorkTime.Desktop
+```
+
+При первом запуске откроется окно входа. Введите адрес сервера (по умолчанию
+`http://localhost:8080`) и учётные данные.
+
+---
+
 ## Конфигурация сервера
 
 | Ключ | Файл | Назначение |

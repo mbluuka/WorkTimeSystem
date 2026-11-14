@@ -1,14 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
+    <!--
+      GUI-подсистема WinExe нужна только Windows-сборке. Привязка идёт к RID,
+      а не к ОС сборки: иначе публикация `-r linux-x64` с Windows породила бы
+      WinExe-заголовок в Linux-бинаре.
+    -->
+    <OutputType>Exe</OutputType>
+    <OutputType Condition="'$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('Windows'))">WinExe</OutputType>
+    <OutputType Condition="$(RuntimeIdentifier.StartsWith('win'))">WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(RuntimeIdentifier)' == '' OR $(RuntimeIdentifier.StartsWith('win'))">app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <!-- Десктоп распространяется как self-contained build для Windows и RED OS (Linux x64) -->
+    <!-- Инвариантная локализация: стабильная сборка на Windows и RED OS без ICU -->
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
