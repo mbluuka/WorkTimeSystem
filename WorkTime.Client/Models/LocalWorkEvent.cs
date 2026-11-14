@@ -31,4 +31,11 @@ public class LocalWorkEvent
 	public DateTime? SyncedAt { get; set; }
 
 	public SyncStatus SyncStatus { get; set; }
+
+	// Монотонный номер события на устройстве: сохраняет локальный порядок
+	// при офлайн-накоплении и последующей пакетной отправке.
+	public long DeviceSeq { get; set; }
+
+	// Проект, к которому относится событие (FR5), обязателен только если выбран.
+	public Guid? ProjectId { get; set; }
 }

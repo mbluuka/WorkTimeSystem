@@ -159,6 +159,8 @@ export const api = {
     request(`/api/reports/summary?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   getTeamReport: (from, to) =>
     request(`/api/reports/team?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  getTeamReportByProject: (from, to) =>
+    request(`/api/reports/team/by-project?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   exportPdf: (userId, from, to) =>
     downloadFile(`/api/reports/export/pdf?userId=${userId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
       `report_${userId}.pdf`),

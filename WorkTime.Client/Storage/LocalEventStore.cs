@@ -16,6 +16,20 @@ public class LocalEventStore
 	public async Task InitializeAsync()
 	{
 		await _db.Database.EnsureCreatedAsync();
+
+		// EnsureCreated не трогает существующую БД, а DeviceSeq/ProjectId
+		// появились позже — добавляем недостающие колонки вручную.
+		await EnsureColumnAsync("DeviceSeq", "INTEGER NOT NULL DEFAULT 0");
+		await EnsureColumnAsync("ProjectId", "TEXT NULL");
+	}
+
+	public async Task<long> NextDeviceSeqAsync()
+	{
+		var max = await _db.WorkEvents
+			.Select(x => (long?)x.DeviceSeq)
+			.MaxAsync();
+
+		return (max ?? 0) + 1;
 	}
 
 	public async Task AddAsync(LocalWorkEvent workEvent)
@@ -70,5 +84,39 @@ public class LocalEventStore
 		return await _db.WorkEvents
 			.OrderBy(x => x.Timestamp)
 			.ToListAsync();
+	}
+
+	private async Task EnsureColumnAsync(string columnName, string columnDefinition)
+	{
+		var connection = _db.Database.GetDbConnection();
+
+		if (connection.State != System.Data.ConnectionState.Open)
+		{
+			await connection.OpenAsync();
+		}
+
+		await using var check = connection.CreateCommand();
+		check.CommandText = $"PRAGMA table_info(WorkEvents);";
+
+		var existing = new List<string>();
+		await using (var reader = await check.ExecuteReaderAsync())
+		{
+			while (await reader.ReadAsync())
+			{
+				// PRAGMA table_info: 1-я колонка — имя поля
+				existing.Add(reader.GetString(1));
+			}
+		}
+
+		if (existing.Contains(columnName, StringComparer.OrdinalIgnoreCase))
+		{
+			return;
+		}
+
+		await using var alter = connection.CreateCommand();
+		alter.CommandText =
+			$"ALTER TABLE WorkEvents ADD COLUMN {columnName} {columnDefinition};";
+
+		await alter.ExecuteNonQueryAsync();
 	}
 }

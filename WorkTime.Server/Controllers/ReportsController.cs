@@ -107,6 +107,104 @@ public class ReportsController : ControllerBase
         return Ok(response);
     }
 
+    // Сводный отчёт по команде с группировкой по проектам (FR14)
+    [HttpGet("team/by-project")]
+    public async Task<ActionResult<TeamReportByProjectResponse>> GetTeamReportByProject(
+        [FromQuery] DateTime from,
+        [FromQuery] DateTime to,
+        [FromQuery] Guid? projectId = null)
+    {
+        if (!TryGetCurrentUser(out var currentUserId, out var currentRole))
+            return Unauthorized();
+
+        if (currentRole != "Admin" && currentRole != "Manager")
+            return Forbid();
+
+        IQueryable<User> usersQuery = currentRole == "Admin"
+            ? _dbContext.Users.AsNoTracking()
+            : _dbContext.Users.AsNoTracking().Where(u => u.Role == "Employee" || u.Role == "Manager");
+
+        var users = await usersQuery.ToListAsync();
+        var userIds = users.Select(u => u.Id).ToList();
+        var userNameById = users.ToDictionary(u => u.Id, u => u.Email);
+
+        var eventsQuery = _dbContext.WorkEvents
+            .AsNoTracking()
+            .Where(w => userIds.Contains(w.UserId) && w.Timestamp >= from && w.Timestamp <= to);
+
+        if (projectId.HasValue)
+            eventsQuery = eventsQuery.Where(w => w.ProjectId == projectId.Value);
+
+        var events = await eventsQuery
+            .OrderBy(w => w.Timestamp)
+            .ToListAsync();
+
+        var projectIds = events
+            .Where(e => e.ProjectId.HasValue)
+            .Select(e => e.ProjectId!.Value)
+            .Distinct()
+            .ToList();
+
+        var projectNameById = await _dbContext.Projects
+            .AsNoTracking()
+            .Where(p => projectIds.Contains(p.Id))
+            .ToDictionaryAsync(p => p.Id, p => p.Name);
+
+        // События без проекта выделены в отдельную строку «Без проекта»,
+        // чтобы сумма по строкам совпадала с итогом команды.
+        var groups = events
+            .GroupBy(e => e.ProjectId ?? Guid.Empty)
+            .OrderByDescending(g => g.Count())
+            .ToList();
+
+        var projectSummaries = new List<ProjectSummary>();
+        long totalTeamMinutes = 0;
+
+        foreach (var group in groups)
+        {
+            var projectSummary = new ProjectSummary
+            {
+                ProjectId = group.Key,
+                ProjectName = group.Key == Guid.Empty
+                    ? "Без проекта"
+                    : projectNameById.GetValueOrDefault(group.Key, "Без проекта"),
+                EmployeeCount = group.Select(e => e.UserId).Distinct().Count()
+            };
+
+            foreach (var userGroup in group.GroupBy(e => e.UserId))
+            {
+                var userSummary = BuildSummary(userGroup.Key, userGroup.ToList(), from, to);
+
+                projectSummary.Employees.Add(new EmployeeSummary
+                {
+                    UserId = userGroup.Key,
+                    UserName = userNameById.GetValueOrDefault(userGroup.Key),
+                    TotalWorkMinutes = userSummary.TotalWorkMinutes,
+                    TotalBreakMinutes = userSummary.TotalBreakMinutes,
+                    DaysWorked = userSummary.Days.Count
+                });
+
+                projectSummary.TotalWorkMinutes += userSummary.TotalWorkMinutes;
+                projectSummary.TotalBreakMinutes += userSummary.TotalBreakMinutes;
+            }
+
+            projectSummaries.Add(projectSummary);
+            totalTeamMinutes += projectSummary.TotalWorkMinutes;
+        }
+
+        var response = new TeamReportByProjectResponse
+        {
+            From = from,
+            To = to,
+            Projects = projectSummaries,
+            TotalTeamMinutes = totalTeamMinutes
+        };
+
+        await SaveReportAsync(currentUserId, from, to, "team-by-project", response);
+
+        return Ok(response);
+    }
+
     [HttpGet("export/pdf")]
     public async Task<IActionResult> ExportPdf(
         [FromQuery] Guid userId,
@@ -214,7 +312,8 @@ public class ReportsController : ControllerBase
         });
 
         var pdfBytes = document.GeneratePdf();
-        var fileName = $"report_{userId:yyyyMMddHHmmss}.pdf";
+        var now = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+        var fileName = $"report_{userId:D}_{now}.pdf";
 
         return File(pdfBytes, "application/pdf", fileName);
     }
@@ -297,7 +396,8 @@ public class ReportsController : ControllerBase
 
         using var ms = new MemoryStream();
         workbook.SaveAs(ms);
-        var fileName = $"report_{userId:yyyyMMddHHmmss}.xlsx";
+        var now = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+        var fileName = $"report_{userId:D}_{now}.xlsx";
 
         return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
     }

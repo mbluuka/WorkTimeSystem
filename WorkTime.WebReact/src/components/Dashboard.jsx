@@ -83,6 +83,17 @@ function getLastStartWorkEvent(allEvents) {
   return null
 }
 
+// Границы выбранного периода: используются и для фильтра таблицы,
+// и для экспорта, чтобы PDF/XLSX совпадали с тем, что видит пользователь.
+function getPeriodRange(period) {
+  const to = new Date()
+  const from = new Date(to)
+  if (period === 'day') from.setDate(from.getDate() - 1)
+  else if (period === 'week') from.setDate(from.getDate() - 7)
+  else from.setMonth(from.getMonth() - 1)
+  return { from, to }
+}
+
 // ============================================================
 // Модальное окно
 // ============================================================
@@ -122,6 +133,7 @@ export default function Dashboard({ onLogout }) {
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [error, setError] = useState('')
   const [syncMessage, setSyncMessage] = useState('')
+  const [exporting, setExporting] = useState(false)
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('deviceId') || '')
   const [clearOutboxConfirm, setClearOutboxConfirm] = useState(false)
   const elapsedRef = useRef(null)
@@ -176,13 +188,10 @@ export default function Dashboard({ onLogout }) {
   const statusConfig = STATUS_CONFIG[statusKey]
 
   const filteredEvents = useMemo(() => {
-    const cutoff = new Date()
-    if (period === 'day') cutoff.setDate(cutoff.getDate() - 1)
-    else if (period === 'week') cutoff.setDate(cutoff.getDate() - 7)
-    else cutoff.setMonth(cutoff.getMonth() - 1)
+    const { from } = getPeriodRange(period)
 
     return allEvents
-      .filter(e => new Date(e.timestamp) >= cutoff)
+      .filter(e => new Date(e.timestamp) >= from)
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
   }, [allEvents, period])
 
@@ -363,6 +372,25 @@ export default function Dashboard({ onLogout }) {
   function getProjectName(id) {
     if (!id) return null
     return projects.find(p => p.id === id)?.name || null
+  }
+
+  // ---------- Экспорт отчёта (FR15) ----------
+
+  async function handleExport(format) {
+    setExporting(true)
+    setError('')
+    try {
+      const { from, to } = getPeriodRange(period)
+      if (format === 'pdf') {
+        await api.exportPdf(user.id, from.toISOString(), to.toISOString())
+      } else {
+        await api.exportXlsx(user.id, from.toISOString(), to.toISOString())
+      }
+    } catch (e) {
+      setError('Ошибка экспорта: ' + e.message)
+    } finally {
+      setExporting(false)
+    }
   }
 
   // ---------- Рендер ----------

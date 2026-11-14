@@ -26,13 +26,13 @@ if (userId == Guid.Empty)
     return;
 }
 
-await using var db = new LocalDbContext();
+    await using var db = new LocalDbContext();
 
-var store = new LocalEventStore(db);
+    var store = new LocalEventStore(db);
 
-await store.InitializeAsync();
+    await store.InitializeAsync();
 
-var syncService = new SyncService(store, httpClient, token);
+    var syncService = new SyncService(store, httpClient, token);
 
 Console.WriteLine();
 Console.WriteLine($"Пользователь: {userId}");
@@ -61,37 +61,37 @@ while (true)
         case "1":
             await CreateEventAsync(
                 store,
+                db,
                 userId,
                 deviceId,
                 WorkEventType.StartWork);
-
             break;
 
         case "2":
             await CreateEventAsync(
                 store,
+                db,
                 userId,
                 deviceId,
                 WorkEventType.StartBreak);
-
             break;
 
         case "3":
             await CreateEventAsync(
                 store,
+                db,
                 userId,
                 deviceId,
                 WorkEventType.EndBreak);
-
             break;
 
         case "4":
             await CreateEventAsync(
                 store,
+                db,
                 userId,
                 deviceId,
                 WorkEventType.EndWork);
-
             break;
 
         case "5":
@@ -235,14 +235,21 @@ static Guid DecodeUserId(string token)
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        if (root.TryGetProperty("nameid", out var nameId))
+        // JwtSecurityTokenHandler на сервере пишет полные URI-имена claim'ов,
+        // JsonWebTokenHandler — короткие "nameid"/"sub": перебираем оба варианта.
+        foreach (var name in new[]
         {
-            return Guid.TryParse(nameId.GetString(), out var id) ? id : Guid.Empty;
-        }
-
-        if (root.TryGetProperty("sub", out var sub))
+            "nameid",
+            "sub",
+            "NameIdentifier",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier"
+        })
         {
-            return Guid.TryParse(sub.GetString(), out var id) ? id : Guid.Empty;
+            if (root.TryGetProperty(name, out var el) &&
+                Guid.TryParse(el.GetString(), out var id))
+            {
+                return id;
+            }
         }
     }
     catch
@@ -293,11 +300,15 @@ static string ReadPassword()
 
 static async Task CreateEventAsync(
     LocalEventStore store,
+    LocalDbContext db,
     Guid userId,
     Guid deviceId,
-    WorkEventType type)
+    WorkEventType type,
+    Guid? projectId = null)
 {
     var now = DateTime.UtcNow;
+
+    var seq = await store.NextDeviceSeqAsync();
 
     var workEvent = new LocalWorkEvent
     {
@@ -307,7 +318,9 @@ static async Task CreateEventAsync(
         Type = type,
         Timestamp = now,
         CreatedAt = now,
-        SyncStatus = SyncStatus.Pending
+        SyncStatus = SyncStatus.Pending,
+        DeviceSeq = seq,
+        ProjectId = projectId
     };
 
     await store.AddAsync(workEvent);
@@ -319,6 +332,8 @@ static async Task CreateEventAsync(
     Console.WriteLine($"Время:     {workEvent.Timestamp:u}");
     Console.WriteLine($"Статус:    {workEvent.SyncStatus}");
     Console.WriteLine($"ID:        {workEvent.Id}");
+    Console.WriteLine($"DeviceSeq: {workEvent.DeviceSeq}");
+    Console.WriteLine($"ProjectId: {workEvent.ProjectId ?? Guid.Empty}");
 
     Pause();
 }

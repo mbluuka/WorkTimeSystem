@@ -79,6 +79,8 @@ builder.Services.AddAuthorization(options =>
 
 // Idempotency and caching
 builder.Services.AddMemoryCache();
+// Окно ручной корректировки записей (FR7): Employee может править только последние N дней
+builder.Services.AddSingleton<WorkTime.Server.Services.PeriodEditGuard>();
 // Register DB-backed idempotency service as scoped (uses DbContext)
 builder.Services.AddScoped<WorkTime.Server.Services.IIdempotencyService, WorkTime.Server.Services.DbIdempotencyService>();
 builder.Services.AddScoped<WorkTime.Server.Services.IBulkUpsertService, WorkTime.Server.Services.BulkUpsertService>();

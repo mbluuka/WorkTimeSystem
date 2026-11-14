@@ -22,14 +22,20 @@ public class UsersController : ControllerBase
         _logger = logger;
     }
 
+    // Manager видит состав команды (FR13), но учётные записи администраторов
+    // ему не показываются — это область видимости Admin.
     [HttpGet]
     public async Task<ActionResult<IEnumerable<UserResponse>>> GetAll()
     {
-        if (!TryGetAdmin(out var currentUserId))
-            return Forbid();
+        if (!TryGetCurrentUser(out _, out var currentRole))
+            return Unauthorized();
 
-        var users = await _dbContext.Users
-            .AsNoTracking()
+        IQueryable<User> query = _dbContext.Users.AsNoTracking();
+
+        if (currentRole != "Admin")
+            query = query.Where(u => u.Role == "Employee" || u.Role == "Manager");
+
+        var users = await query
             .OrderBy(u => u.Email)
             .ToListAsync();
 
@@ -39,8 +45,8 @@ public class UsersController : ControllerBase
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<UserResponse>> GetById(Guid id)
     {
-        if (!TryGetAdmin(out var currentUserId))
-            return Forbid();
+        if (!TryGetCurrentUser(out _, out var currentRole))
+            return Unauthorized();
 
         var user = await _dbContext.Users
             .AsNoTracking()
@@ -48,6 +54,9 @@ public class UsersController : ControllerBase
 
         if (user is null)
             return NotFound();
+
+        if (currentRole != "Admin" && user.Role == "Admin")
+            return Forbid();
 
         return Ok(ToResponse(user));
     }
@@ -185,6 +194,19 @@ public class UsersController : ControllerBase
     }
 
     // --- Helpers ---
+
+    private bool TryGetCurrentUser(out Guid userId, out string role)
+    {
+        userId = Guid.Empty;
+        role = "Employee";
+
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdClaim, out userId))
+            return false;
+
+        role = User.FindFirstValue(ClaimTypes.Role) ?? "Employee";
+        return true;
+    }
 
     private bool TryGetAdmin(out Guid currentUserId)
     {

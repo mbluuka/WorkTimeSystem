@@ -54,7 +54,9 @@ public class SyncService
                         deviceId = workEvent.DeviceId,
                         type = workEvent.Type,
                         timestamp = workEvent.Timestamp,
-                        createdAt = workEvent.CreatedAt
+                        createdAt = workEvent.CreatedAt,
+                        deviceSeq = workEvent.DeviceSeq,
+                        projectId = workEvent.ProjectId
                     });
 
                 if (response.IsSuccessStatusCode)

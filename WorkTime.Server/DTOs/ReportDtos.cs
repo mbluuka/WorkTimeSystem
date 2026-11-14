@@ -71,3 +71,21 @@ public class EmployeeSummary
     public int DaysWorked { get; set; }
     public string? ProjectName { get; set; }
 }
+
+public class ProjectSummary
+{
+    public Guid ProjectId { get; set; }
+    public string? ProjectName { get; set; }
+    public long TotalWorkMinutes { get; set; }
+    public long TotalBreakMinutes { get; set; }
+    public int EmployeeCount { get; set; }
+    public List<EmployeeSummary> Employees { get; set; } = new();
+}
+
+public class TeamReportByProjectResponse
+{
+    public DateTime From { get; set; }
+    public DateTime To { get; set; }
+    public List<ProjectSummary> Projects { get; set; } = new();
+    public long TotalTeamMinutes { get; set; }
+}

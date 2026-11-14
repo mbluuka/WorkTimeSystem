@@ -11,16 +11,16 @@ Local-first система учёта рабочего времени с офл�
 │  JWT-аутентификация, идемпотентность, SyncQueue │
 └──────────────────┬──────────────────────────────┘
                    │
-     ┌─────────────┼─────────────┐
-     │             │             │
-     ▼             ▼             ▼
-┌─────────┐  ┌──────────┐  ┌───────────┐
-│ React   │  │ Console  │  │ (Flutter) │
-│ PWA     │  │ Client   │  │  (план)   │
-│ (веб)   │  │ (C#)     │  │           │
-└─────────┘  └──────────┘  └───────────┘
-  SQLite/      SQLite
-  IndexedDB    (локальная БД)
+     ┌─────────────┼─────────────┬───────────┐
+     │             │             │           │
+     ▼             ▼             ▼           ▼
+┌─────────┐  ┌──────────┐  ┌───────────┐  ┌──────────┐
+│ React   │  │ Console  │  │  Desktop  │  │ (Flutter)│
+│ PWA     │  │ Client   │  │ (Avalonia)│  │  (план)  │
+│ (веб)   │  │ (C#)     │  │ (C#)      │  │          │
+└─────────┘  └──────────┘  └───────────┘  └──────────┘
+  SQLite/      SQLite      SQLite
+  IndexedDB    (локальная БД) (локальная БД)
 ```
 
 ## Технологии
@@ -32,6 +32,7 @@ Local-first система учёта рабочего времени с офл�
 | Аутентификация | JWT (BCrypt для хеширования паролей) |
 | Веб-клиент | React 18 + Vite (PWA, IndexedDB) |
 | Консольный клиент | C# / .NET 8 / SQLite (EF Core) |
+| Десктопный клиент | C# / .NET 8 / Avalonia 11 (Windows, Linux/RED OS) |
 | Экспорт PDF | QuestPDF |
 | Экспорт XLSX | ClosedXML |
 | Контейнеризация | Docker Compose (PostgreSQL + сервер + PWA) |
@@ -60,9 +61,12 @@ docker compose up --build
 
 При первом запуске автоматически:
 - Применяются миграции EF Core
-- Создаются seed-пользователи:
+- Создаются seed-пользователи (пароли — только для локальной разработки):
   - **Админ:** `admin@worktime.local` / `Admin@123`
   - **Сотрудник:** `employee@worktime.local` / `Employee@123`
+  - **Руководитель:** `manager@worktime.local` / `Manager@123`
+
+  А также справочные проекты и устройства для сотрудников.
 
 Остановить всё:
 ```bash
@@ -146,6 +150,34 @@ dotnet run
 
 При запуске потребуется ввести email и пароль (используйте seed-учётные данные).
 
+Локальная база — `worktime-local.db` в папке запуска (путь настраивается).
+
+### 5. Десктопный клиент (Avalonia)
+
+```bash
+cd WorkTime.Desktop
+dotnet run
+```
+
+Кроссплатформенный GUI-клиент (Windows / Linux, включая RED OS): крупные кнопки
+«Начать день / Перерыв / Вернуться / Закончить», выбор проекта, индикатор очереди
+синхронизации. Работает офлайн: события пишутся в локальный SQLite и уходят на
+сервер при появлении связи. Адрес сервера задаётся в окне входа (по умолчанию
+`http://localhost:8080`).
+
+UI собран кодом на C# без XAML, поэтому проект одинаково собирается на Windows и
+Linux и не зависит от генераторов имён Avalonia.
+
+---
+
+## Конфигурация сервера
+
+| Ключ | Файл | Назначение |
+|------|------|-----------|
+| `ConnectionStrings:WorkTimeDatabase` | appsettings.*.json | Строка подключения PostgreSQL |
+| `Jwt:Key`, `Jwt:Issuer`, `Jwt:Audience` | appsettings.json | Параметры JWT |
+| `TimeEditing:EmployeeEditWindowDays` | appsettings.json | FR7: окно ручной правки прошлых периодов для Employee/Manager (по умолчанию 7 дней, Admin правит любые периоды) |
+
 ---
 
 ## API Endpoints
@@ -179,15 +211,16 @@ dotnet run
 | POST | `/api/devices` | Регистрация устройства |
 | DELETE | `/api/devices/{id}` | Удаление устройства |
 
-### Пользователи (Admin)
+### Пользователи
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/users` | Список пользователей |
-| POST | `/api/users` | Создание |
-| PUT | `/api/users/{id}` | Обновление |
-| DELETE | `/api/users/{id}` | Удаление |
-| POST | `/api/users/{id}/block` | Блокировка |
-| POST | `/api/users/{id}/unblock` | Разблокировка |
+| GET | `/api/users` | Список пользователей (Manager+) |
+| GET | `/api/users/{id}` | Пользователь по ID (Manager+) |
+| POST | `/api/users` | Создание (Admin) |
+| PUT | `/api/users/{id}` | Обновление (Admin) |
+| DELETE | `/api/users/{id}` | Удаление (Admin) |
+| POST | `/api/users/{id}/block` | Блокировка (Admin) |
+| POST | `/api/users/{id}/unblock` | Разблокировка (Admin) |
 
 ### Проекты
 | Метод | Путь | Описание |
@@ -210,8 +243,9 @@ dotnet run
 |-------|------|----------|
 | GET | `/api/reports/summary` | Сводка по пользователю |
 | GET | `/api/reports/team` | Сводка по команде (Manager+) |
-| GET | `/api/reports/export/pdf` | Экспорт PDF |
-| GET | `/api/reports/export/xlsx` | Экспорт XLSX |
+| GET | `/api/reports/team/by-project` | Сводка по команде с группировкой по проектам (Manager+) |
+| GET | `/api/reports/export/pdf` | Экспорт PDF (своих записей; Manager+ — любых) |
+| GET | `/api/reports/export/xlsx` | Экспорт XLSX (своих записей; Manager+ — любых) |
 
 ### Аудит (Admin)
 | Метод | Путь | Описание |
@@ -243,12 +277,16 @@ WorkTimeSystem/
 │   ├── Models/                   # LocalWorkEvent
 │   ├── Services/                 # SyncService
 │   └── Storage/                  # LocalEventStore
+├── WorkTime.Desktop/             # Десктопный клиент (Avalonia, UI на C# без XAML)
+│   └── Services/                 # DesktopApiClient, DesktopPaths
 ├── WorkTime.ClientSdk/           # PWA SDK (IndexedDB, синхронизация)
 ├── WorkTime.WebReact/            # React PWA
 │   └── src/
 │       ├── components/           # Login, Dashboard, ManagerView, AdminView
 │       ├── api.js                # API-клиент с JWT
 │       └── pwaClient.js          # Мост к SDK
+├── WorkTime.Server.Tests/        # Модульные тесты сервера
+├── WorkTime.Server.IntegrationTests/  # Интеграционные тесты (WebApplicationFactory)
 ├── docker-compose.yml            # Docker: PostgreSQL + сервер
 ├── start-dev.ps1                 # Windows: локальный запуск всех сервисов
 ├── start-dev.sh                  # Linux/macOS: локальный запуск всех сервисов
@@ -258,12 +296,19 @@ WorkTimeSystem/
 ## Тестирование
 
 ```bash
+# Модульные + интеграционные тесты сервера (21 тест)
+dotnet test WorkTimeSystem.slnx
+
 # Сервер
 dotnet build WorkTime.Server/WorkTime.Server.csproj
 
-# Клиент
+# Клиенты
 dotnet build WorkTime.Client/WorkTime.Client.csproj
+dotnet build WorkTime.Desktop/WorkTime.Desktop.csproj
 
 # Веб-клиент
-cd WorkTime.WebReact && npm run build
+cd WorkTime.WebReact && npm install && npm run build
 ```
+
+CI (`.github/workflows/ci.yml`) собирает всё решение на ubuntu-latest в Release и
+прогоняет тесты против PostgreSQL-сервиса.

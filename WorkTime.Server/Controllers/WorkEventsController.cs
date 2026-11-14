@@ -19,17 +19,20 @@ public class WorkEventsController : ControllerBase
     private readonly WorkTimeDbContext _dbContext;
     private readonly WorkTime.Server.Services.IIdempotencyService _idempotency;
     private readonly WorkTime.Server.Services.IBulkUpsertService _bulkUpsert;
+    private readonly WorkTime.Server.Services.PeriodEditGuard _editGuard;
     private readonly ILogger<WorkEventsController> _logger;
 
     public WorkEventsController(
         WorkTimeDbContext dbContext,
         WorkTime.Server.Services.IIdempotencyService idempotency,
         WorkTime.Server.Services.IBulkUpsertService bulkUpsert,
+        WorkTime.Server.Services.PeriodEditGuard editGuard,
         ILogger<WorkEventsController> logger)
     {
         _dbContext = dbContext;
         _idempotency = idempotency;
         _bulkUpsert = bulkUpsert;
+        _editGuard = editGuard;
         _logger = logger;
     }
 
@@ -300,6 +303,20 @@ public class WorkEventsController : ControllerBase
             return Forbid();
         }
 
+        // Employee: ручная корректировка разрешена только в пределах окна (FR7).
+        // Проверяем и текущее время записи, и новое — иначе запись можно
+        // «перетащить» из прошлого в разрешённое окно.
+        var editError = _editGuard.CheckEdit(currentRole, workEvent.Timestamp);
+        if (editError is null && req.Timestamp != default)
+        {
+            editError = _editGuard.CheckEdit(currentRole, req.Timestamp);
+        }
+
+        if (editError is not null)
+        {
+            return BadRequest(new { message = editError });
+        }
+
         // Validate project if specified
         if (req.ProjectId.HasValue)
         {
@@ -353,6 +370,13 @@ public class WorkEventsController : ControllerBase
                 workEvent.UserId))
         {
             return Forbid();
+        }
+
+        // Удаление прошлых записей также ограничено окном корректировки (FR7)
+        var deleteError = _editGuard.CheckEdit(currentRole, workEvent.Timestamp);
+        if (deleteError is not null)
+        {
+            return BadRequest(new { message = deleteError });
         }
 
         _dbContext.WorkEvents.Remove(workEvent);

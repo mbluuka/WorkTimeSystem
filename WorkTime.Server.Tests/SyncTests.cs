@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using WorkTime.Server.Controllers;
 using WorkTime.Server.Data;
@@ -83,7 +84,8 @@ public class SyncTests
         var idemp = new DbIdempotencyService(ctx);
 
         var bulk = new WorkTime.Server.Services.BulkUpsertService(ctx);
-        var controller = new WorkEventsController(ctx, idemp, bulk, NullLogger<WorkEventsController>.Instance);
+        var editGuard = new WorkTime.Server.Services.PeriodEditGuard(new ConfigurationBuilder().Build());
+        var controller = new WorkEventsController(ctx, idemp, bulk, editGuard, NullLogger<WorkEventsController>.Instance);
         controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext
         {
             HttpContext = AuthenticatedContext(user.Id)
@@ -126,7 +128,8 @@ public class SyncTests
         var idemp = new DbIdempotencyService(ctx);
 
         var bulk2 = new WorkTime.Server.Services.BulkUpsertService(ctx);
-        var controller = new WorkEventsController(ctx, idemp, bulk2, NullLogger<WorkEventsController>.Instance);
+        var editGuard = new WorkTime.Server.Services.PeriodEditGuard(new ConfigurationBuilder().Build());
+        var controller = new WorkEventsController(ctx, idemp, bulk2, editGuard, NullLogger<WorkEventsController>.Instance);
         var http = AuthenticatedContext(user.Id);
         http.Request.Headers["Idempotency-Key"] = "key-123";
         controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext

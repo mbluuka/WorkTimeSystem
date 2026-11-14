@@ -39,7 +39,7 @@ public class IdempotencyMiddleware
         }
 
         var service = context.RequestServices.GetService(typeof(WorkTime.Server.Services.IIdempotencyService)) as WorkTime.Server.Services.IIdempotencyService;
-        if (service is not null && service.TryGet(key, out var cached))
+        if (service is not null && service.TryGet(key, out var cached) && cached is not null)
         {
             context.Response.StatusCode = cached.StatusCode;
             if (!string.IsNullOrEmpty(cached.ContentType))

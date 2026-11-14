@@ -1,4 +1,7 @@
 <Solution>
   <Project Path="WorkTime.Client/WorkTime.Client.csproj" />
+  <Project Path="WorkTime.Desktop/WorkTime.Desktop.csproj" />
   <Project Path="WorkTime.Server/WorkTime.Server.csproj" />
+  <Project Path="WorkTime.Server.Tests/WorkTime.Server.Tests.csproj" />
+  <Project Path="WorkTime.Server.IntegrationTests/WorkTime.Server.IntegrationTests.csproj" />
 </Solution>

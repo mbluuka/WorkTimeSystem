@@ -14,11 +14,16 @@ namespace WorkTime.Server.Controllers;
 public class TimeEntriesController : ControllerBase
 {
     private readonly WorkTimeDbContext _dbContext;
+    private readonly WorkTime.Server.Services.PeriodEditGuard _editGuard;
     private readonly ILogger<TimeEntriesController> _logger;
 
-    public TimeEntriesController(WorkTimeDbContext dbContext, ILogger<TimeEntriesController> logger)
+    public TimeEntriesController(
+        WorkTimeDbContext dbContext,
+        WorkTime.Server.Services.PeriodEditGuard editGuard,
+        ILogger<TimeEntriesController> logger)
     {
         _dbContext = dbContext;
+        _editGuard = editGuard;
         _logger = logger;
     }
 
@@ -128,6 +133,18 @@ public class TimeEntriesController : ControllerBase
         if (!CanAccessData(currentUserId, currentRole, entry.UserId))
             return Forbid();
 
+        // FR7: проверка окна редактирования
+        var editError = _editGuard.CheckEdit(currentRole, entry.Start);
+        if (editError is null && req.End.HasValue)
+        {
+            editError = _editGuard.CheckEdit(currentRole, req.End.Value);
+        }
+
+        if (editError is not null)
+        {
+            return BadRequest(new { message = editError });
+        }
+
         if (req.Start.HasValue)
             entry.Start = req.Start.Value;
         if (req.End.HasValue)
@@ -154,6 +171,13 @@ public class TimeEntriesController : ControllerBase
 
         if (!CanAccessData(currentUserId, currentRole, entry.UserId))
             return Forbid();
+
+        // FR7: проверка окна редактирования
+        var deleteError = _editGuard.CheckEdit(currentRole, entry.Start);
+        if (deleteError is not null)
+        {
+            return BadRequest(new { message = deleteError });
+        }
 
         _dbContext.TimeEntries.Remove(entry);
         await _dbContext.SaveChangesAsync();
