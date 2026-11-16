@@ -109,8 +109,27 @@ public class ProjectsController : ControllerBase
         if (currentRole != "Admin" && project.ManagerId != currentUserId)
             return Forbid();
 
+        // WorkEvents.ProjectId -> Projects — FK без каскада, поэтому удаление
+        // проекта с записями упало бы 500 на уровне PostgreSQL. Возвращаем 400
+        // с понятным текстом, чтобы UI предложил сначала отвязать или удалить записи.
+        var hasWorkEvents = await _dbContext.WorkEvents.AnyAsync(w => w.ProjectId == id);
+        if (hasWorkEvents)
+            return BadRequest(new
+            {
+                message = "К проекту привязаны рабочие записи. Сначала перенесите их на другой проект."
+            });
+
         _dbContext.Projects.Remove(project);
-        await _dbContext.SaveChangesAsync();
+
+        try
+        {
+            await _dbContext.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to delete project {ProjectId}", id);
+            return BadRequest(new { message = "Не удалось удалить проект: есть связанные записи." });
+        }
 
         return NoContent();
     }

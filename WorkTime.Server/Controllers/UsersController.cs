@@ -117,9 +117,14 @@ public class UsersController : ControllerBase
             user.Role = req.Role;
         }
 
-        if (req.IsBlocked.HasValue)
+        // Раньше здесь обновлялся только UpdatedAt, а IsBlocked игнорировался:
+        // PUT с {"isBlocked": true} возвращал 200, но пользователя не блокировал.
+        if (req.IsBlocked.HasValue && user.IsBlocked != req.IsBlocked.Value)
         {
-            user.UpdatedAt = DateTime.UtcNow;
+            if (req.IsBlocked.Value && user.Id == currentUserId)
+                return BadRequest(new { message = "Cannot block your own account" });
+
+            user.IsBlocked = req.IsBlocked.Value;
         }
 
         user.UpdatedAt = DateTime.UtcNow;

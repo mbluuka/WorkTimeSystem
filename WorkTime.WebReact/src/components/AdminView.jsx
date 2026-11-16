@@ -1,6 +1,31 @@
 import React, { useState, useEffect } from 'react'
 import { api } from '../api'
 
+// ============================================================
+// Модальное окно
+// ============================================================
+
+function Modal({ isOpen, onClose, title, children }) {
+  if (!isOpen) return null
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>{title}</h3>
+        {children}
+        <div className="modal-actions">
+          <button type="button" className="btn btn-small" onClick={onClose}>Закрыть</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const ROLES = [
+  { value: 'Employee', label: 'Сотрудник' },
+  { value: 'Manager', label: 'Руководитель' },
+  { value: 'Admin', label: 'Администратор' }
+]
+
 export default function AdminView({ user }) {
   const [users, setUsers] = useState([])
   const [auditLogs, setAuditLogs] = useState([])
@@ -9,6 +34,9 @@ export default function AdminView({ user }) {
   const [error, setError] = useState('')
   const [newUser, setNewUser] = useState({ email: '', password: '', fullName: '', role: 'Employee' })
   const [newProject, setNewProject] = useState({ name: '', description: '' })
+  const [editUser, setEditUser] = useState(null)
+  const [editProject, setEditProject] = useState(null)
+  const [deleteProjectConfirm, setDeleteProjectConfirm] = useState(null)
 
   useEffect(() => {
     loadUsers()
@@ -40,6 +68,11 @@ export default function AdminView({ user }) {
   }
 
   const handleToggleBlock = async (u) => {
+    // Сервер отвечает 400 «Cannot block your own account», но лучше не слать запрос.
+    if (u.isBlocked === false && u.id === user?.id) {
+      setError('Нельзя заблокировать собственную учётную запись')
+      return
+    }
     try {
       if (u.isBlocked) await api.unblockUser(u.id)
       else await api.blockUser(u.id)
@@ -57,11 +90,61 @@ export default function AdminView({ user }) {
     } catch (err) { setError(err.message) }
   }
 
+  const startEditUser = (u) => {
+    setError('')
+    setEditUser({ id: u.id, email: u.email, fullName: u.fullName || '', role: u.role, isBlocked: u.isBlocked })
+  }
+
+  const handleUpdateUser = async (e) => {
+    e.preventDefault()
+    try {
+      await api.updateUser(editUser.id, {
+        fullName: editUser.fullName,
+        role: editUser.role,
+        isBlocked: editUser.isBlocked
+      })
+      setEditUser(null)
+      await loadUsers()
+      await loadAuditLogs()
+    } catch (err) { setError(err.message) }
+  }
+
   const handleCreateProject = async (e) => {
     e.preventDefault()
     try {
       await api.createProject(newProject)
       setNewProject({ name: '', description: '' })
+      await loadProjects()
+    } catch (err) { setError(err.message) }
+  }
+
+  const startEditProject = (p) => {
+    setError('')
+    setEditProject({ id: p.id, name: p.name, description: p.description || '' })
+  }
+
+  const handleUpdateProject = async (e) => {
+    e.preventDefault()
+    try {
+      await api.updateProject(editProject.id, {
+        name: editProject.name,
+        description: editProject.description
+      })
+      setEditProject(null)
+      await loadProjects()
+    } catch (err) { setError(err.message) }
+  }
+
+  const askDeleteProject = (p) => {
+    setError('')
+    setDeleteProjectConfirm(p)
+  }
+
+  const handleDeleteProject = async () => {
+    if (!deleteProjectConfirm) return
+    try {
+      await api.deleteProject(deleteProjectConfirm.id)
+      setDeleteProjectConfirm(null)
       await loadProjects()
     } catch (err) { setError(err.message) }
   }
@@ -124,6 +207,7 @@ export default function AdminView({ user }) {
                   <td><span className="role-badge">{u.role}</span></td>
                   <td>{u.isBlocked ? <span className="badge-danger">Заблокирован</span> : <span className="badge-ok">Активен</span>}</td>
                   <td>
+                    <button className="btn btn-small" onClick={() => startEditUser(u)}>Редактировать</button>
                     <button className="btn btn-small" onClick={() => handleToggleBlock(u)}>
                       {u.isBlocked ? 'Разблокировать' : 'Заблокировать'}
                     </button>
@@ -137,42 +221,47 @@ export default function AdminView({ user }) {
       )}
 
       {tab === 'projects' && (
-        <div className="card">
-          <h2>Проекты</h2>
-          <form className="inline-form" onSubmit={handleCreateProject}>
-            <input
-              type="text" placeholder="Название проекта" required
-              value={newProject.name}
-              onChange={e => setNewProject({ ...newProject, name: e.target.value })}
-            />
-            <input
-              type="text" placeholder="Описание"
-              value={newProject.description}
-              onChange={e => setNewProject({ ...newProject, description: e.target.value })}
-            />
-            <button type="submit" className="btn btn-primary">Создать</button>
-          </form>
+          <div className="card">
+            <h2>Проекты</h2>
+            <form className="inline-form" onSubmit={handleCreateProject}>
+              <input
+                type="text" placeholder="Название проекта" required
+                value={newProject.name}
+                onChange={e => setNewProject({ ...newProject, name: e.target.value })}
+              />
+              <input
+                type="text" placeholder="Описание"
+                value={newProject.description}
+                onChange={e => setNewProject({ ...newProject, description: e.target.value })}
+              />
+              <button type="submit" className="btn btn-primary">Создать</button>
+            </form>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Название</th>
-                <th>Описание</th>
-                <th>Создан</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map(p => (
-                <tr key={p.id}>
-                  <td>{p.name}</td>
-                  <td>{p.description || '—'}</td>
-                  <td>{new Date(p.createdAt).toLocaleDateString('ru-RU')}</td>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Название</th>
+                  <th>Описание</th>
+                  <th>Создан</th>
+                  <th>Действия</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {projects.map(p => (
+                  <tr key={p.id}>
+                    <td>{p.name}</td>
+                    <td>{p.description || '—'}</td>
+                    <td>{new Date(p.createdAt).toLocaleDateString('ru-RU')}</td>
+                    <td>
+                      <button className="btn btn-small" onClick={() => startEditProject(p)}>Редактировать</button>
+                      <button className="btn btn-small btn-danger" onClick={() => askDeleteProject(p)}>Удалить</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
       {tab === 'audit' && (
         <div className="card">
@@ -202,6 +291,91 @@ export default function AdminView({ user }) {
           </table>
         </div>
       )}
+
+      <Modal isOpen={!!editUser} onClose={() => setEditUser(null)} title={`Редактирование: ${editUser?.email || ''}`}>
+        {editUser && (
+          <form className="edit-form" onSubmit={handleUpdateUser}>
+            <div className="form-group">
+              <label htmlFor="au-email">Email</label>
+              <input id="au-email" type="text" value={editUser.email} disabled />
+            </div>
+            <div className="form-group">
+              <label htmlFor="au-fio">ФИО</label>
+              <input
+                id="au-fio" type="text" placeholder="Фамилия Имя Отчество"
+                value={editUser.fullName}
+                onChange={e => setEditUser({ ...editUser, fullName: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="au-role">Роль</label>
+              <select
+                id="au-role" value={editUser.role}
+                onChange={e => setEditUser({ ...editUser, role: e.target.value })}
+              >
+                {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="au-block">
+                <input
+                  id="au-block" type="checkbox" checked={!!editUser.isBlocked}
+                  disabled={editUser.id === user?.id}
+                  title={editUser.id === user?.id ? 'Нельзя заблокировать собственную учётную запись' : undefined}
+                  onChange={e => setEditUser({ ...editUser, isBlocked: e.target.checked })}
+                />
+                {' '}Заблокирован
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button type="submit" className="btn btn-primary btn-small">Сохранить</button>
+              <button type="button" className="btn btn-small" onClick={() => setEditUser(null)}>Отмена</button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      <Modal isOpen={!!editProject} onClose={() => setEditProject(null)} title="Редактирование проекта">
+        {editProject && (
+          <form className="edit-form" onSubmit={handleUpdateProject}>
+            <div className="form-group">
+              <label htmlFor="ap-name">Название</label>
+              <input
+                id="ap-name" type="text" required
+                value={editProject.name}
+                onChange={e => setEditProject({ ...editProject, name: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="ap-desc">Описание</label>
+              <input
+                id="ap-desc" type="text"
+                value={editProject.description}
+                onChange={e => setEditProject({ ...editProject, description: e.target.value })}
+              />
+            </div>
+            <div className="modal-actions">
+              <button type="submit" className="btn btn-primary btn-small">Сохранить</button>
+              <button type="button" className="btn btn-small" onClick={() => setEditProject(null)}>Отмена</button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      <Modal isOpen={!!deleteProjectConfirm} onClose={() => setDeleteProjectConfirm(null)} title="Удаление проекта">
+        {deleteProjectConfirm && (
+          <div>
+            <p>
+              Удалить проект «{deleteProjectConfirm.name}»? Если к нему привязаны рабочие
+              записи, сервер не позволит удалить его — сначала перенесите записи.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-danger btn-small" onClick={handleDeleteProject}>Удалить</button>
+              <button type="button" className="btn btn-small" onClick={() => setDeleteProjectConfirm(null)}>Отмена</button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }
