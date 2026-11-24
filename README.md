@@ -362,7 +362,7 @@ cd /home/user/WorkTime-Desktop
 | FR16 | CRUD пользователей администратором | ✅ | `UsersController` + `AdminView` (создание, редактирование ФИО/роли/блокировки, удаление) |
 | FR17 | Просмотр аудита действий | ✅ | `AuditLogsController`, вкладка «Аудит» в AdminView |
 | FR18 | Веб-интерфейс (React) | ✅ | `WorkTime.WebReact` (React 18 + Vite, PWA) |
-| FR19 | **Мобильные приложения (Android/iOS)** | ❌ **не реализовано** | Flutter-клиент отсутствует, SDK не установлен. См. раздел «Мобильный клиент» ниже |
+| FR19 | **Мобильные приложения (Android/iOS)** | ✅ Android / ⚠️ iOS | `WorkTime.Mobile` (Flutter 3.50, Dart 3.14): вход по JWT, локальная SQLite, офлайн-очередь, push/pull-синхронизация, отметки дня, корректировка и удаление записей. APK собирается (`flutter build apk`), `flutter analyze` без замечаний, 16 тестов. iOS на Windows собрать нельзя (нужен macOS + Xcode) — оставлено как направление развития |
 | FR20 | Десктоп (Windows/Linux/RED OS) | ✅ | `WorkTime.Desktop` (Avalonia 11, UI на C# без XAML), мануал публикации для RED OS |
 
 ### Нефункциональные требования
@@ -373,7 +373,7 @@ cd /home/user/WorkTime-Desktop
 | NFR2 | До 50 одновременных пользователей | ➖ не измерялось | Нет нагрузочного тестирования; горизонтальное масштабирование не проверялось |
 | NFR3 | Отклик API p95 ≤ 200 мс | ➕ выполнено на наблюдаемых данных | Ответы локального Docker-сервера — единицы–десятки мс; **формального замера p95 не было** |
 | NFR4 | Синхронизация очереди до 50 записей ≤ 5 с | ➖ не измерялось | `BulkUpsertService` (COPY + upsert) спроектирован для пакетной загрузки, но время не замерено |
-| NFR5 | Android 8+ | ❌ | Нет мобильного клиента (FR19) |
+| NFR5 | Android 8+ | ✅ | `WorkTime.Mobile`: `minSdk = 26` (Android 8.0), сборка APK подтверждена |
 | NFR6 | Windows 10+, RED OS 7+ | ✅ | Собран и запущен на Windows; `linux-x64` self-contained опубликован (ELF проверен), на реальной RED OS не тестировалось |
 | NFR7 | Офлайн неограниченно по времени | ✅ | Локальная БД + очередь без таймаута хранения |
 
@@ -391,37 +391,61 @@ cd /home/user/WorkTime-Desktop
    но нигде не используется; `TimeEntry` не имеет `LastModified`/`SyncStatus`
    (используется `UpdatedAt`); enum `SyncStatus` в коде не применяется.
    Фактически роль версии выполняет `WorkEvent.DeviceSeq` + `ServerOrder`.
-3. **Локальная БД мобильного клиента** по документу — Hive;Flutter-клиент не разработан,
-   поэтому выбор хранилища не подтверждён практикой.
+3. **Локальная БД мобильного клиента** по документу — Hive; реализована **SQLite**
+   (`sqflite`) с копией серверной схемы `WorkEvents`. Выбор обоснован тем, что схема
+   совпадает с `WorkTime.Client.Data.LocalDbContext` один в один, поэтому одна и та же
+   запись проходит bulk-upsert без дополнительных преобразований; Hive — документная БД
+   и потребовала бы отдельного отображения сущностей.
 4. **Redis (опционально)** не используется: очереди и идемпотентность реализованы
    через PostgreSQL. Требование помечено как опциональное, отступление допустимо.
 
-### Мобильный клиент (FR19) — что нужно для реализации
+### Мобильный клиент (FR19) — реализация
 
-Требуется установить (ориентировочно 6–8 ГБ на диске):
+`WorkTime.Mobile` — приложение на Flutter (Dart), реализованное по тому же
+local-first контракту, что десктопный и консольный клиенты.
 
-| Компонент | Зачем | Вариант A (эмулятор) | Вариант B (реальный телефон) |
-|-----------|-------|:---:|:---:|
-| Flutter SDK (stable) | Компилятор Dart, `flutter` CLI, шаблоны проектов | обязателен | обязателен |
-| Git | Нужен Flutter SDK для своей работы | обязателен | обязателен |
-| Android SDK + platform-tools (`adb`) | Сборка APK, разрешение лицензий | обязателен | обязателен |
-| Android Studio | GUI-установка SDK/образов, AVD Manager | рекомендуется | не обязателен (хватит `sdkmanager`) |
-| JDK 17 | Gradle требует Java 17 | обязателен | обязателен |
-| Образ AVD (x86_64, API 33+) + эмулятор | Виртуальное устройство для запуска | обязателен | не нужен |
-| USB-отладка на телефоне + драйвер | Установка APK на устройство | не нужен | обязателен |
-| iOS: macOS + Xcode | Сборка под iOS | невозможно на Windows | невозможно на Windows |
+| Слой | Файл | Что делает |
+|------|------|-----------|
+| Модель | `lib/models/work_event.dart` | `WorkEvent`, `WorkEventType`, `SyncStatus`. enum → строка в REST (`JsonStringEnumConverter`) и число в SQLite |
+| Хранилище | `lib/storage/local_event_store.dart` | SQLite `worktime-local.db` (v2, схема = `LocalDbContext`), очередь Pending, `DeviceSeq`, сводка `summarize` |
+| API | `lib/services/api_client.dart` | login, регистрация устройства, POST/PUT/DELETE событий, sync-выгрузка; разбор userId из JWT |
+| Идентичность | `lib/services/device_identity.dart` | стабильный device id и сессия в SharedPreferences |
+| Синхронизация | `lib/services/sync_service.dart` | push очереди → pull чужих устройств → самолечение при «Device does not exist» |
+| UI | `lib/screens/login_screen.dart`, `home_screen.dart` | вход (FR11); крупные кнопки «Начать день / Перерыв / Закончить день», статус, сводка, история с правкой и удалением, индикатор синхронизации |
 
-**Ограничение по iOS:** собрать IPA на Windows нельзя — требуется macOS с Xcode.
-FR19 формулируется как «Android/iOS», поэтому реалистичный объём — **Android**,
-а для iOS обосновать платформу-кандидат и оставить как направление развития.
+Ключевые решения, согласованные с сервером:
+- `PUT /api/WorkEvents/{id}` отправляет **все три поля** (`type`, `timestamp`,
+  `projectId`) — сервер присваивает `Type` безусловно, отсутствие поля сбросило бы его в `StartWork`;
+- правка/удаление записи старше 7 дней не блокируется на клиенте — `PeriodEditGuard`
+  на сервере вернёт 400 с текстом, который показывается пользователю (FR7);
+- адреса по умолчанию: эмулятор Android видит хост как `http://10.0.2.2:8080`,
+  на телефоне нужно указать LAN-IP машины с сервером (поле настраивается на экране входа).
 
-**Проверка окружения после установки:**
+**Сборка и запуск (Windows):**
 
 ```powershell
-flutter --version
-flutter doctor          # все критичные компоненты должны быть ✓
-flutter doctor --android-licenses
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+flutter pub get
+flutter analyze          # замечаний нет
+flutter test             # 16 тестов (контракт + widget)
+flutter build apk --debug
+# APK: build\app\outputs\flutter-apk\app-debug.apk
 ```
+
+Запуск на эмуляторе:
+
+```powershell
+flutter emulators --launch Medium_Phone_API_37.0
+flutter run              # либо flutter install после сборки
+```
+
+Сервер для проверки поднимается как обычно (`docker compose up -d`, `:8080`);
+учётка сотрудника — `employee@worktime.local` / `Employee@123`.
+
+**Ограничение по iOS:** собрать IPA на Windows нельзя — требуется macOS с Xcode.
+FR19 закрывается Android-клиентом; iOS остаётся направлением развития (код
+не содержит Android-специфичных вызовов, кроме `dart:io Platform`, поэтому
+портирование сводится к сборке под iOS).
 
 ## Структура проекта
 
@@ -442,6 +466,12 @@ WorkTimeSystem/
 │   └── Storage/                  # LocalEventStore
 ├── WorkTime.Desktop/             # Десктопный клиент (Avalonia, UI на C# без XAML)
 │   └── Services/                 # DesktopApiClient, DesktopPaths
+├── WorkTime.Mobile/              # Мобильный клиент (Flutter, Android)
+│   ├── lib/models/               # WorkEvent, WorkEventType, SyncStatus
+│   ├── lib/storage/              # LocalEventStore (SQLite)
+│   ├── lib/services/             # ApiClient, DeviceIdentity, SyncService
+│   ├── lib/screens/              # LoginScreen, HomeScreen
+│   └── android/                  # Gradle-проект, AndroidManifest
 ├── WorkTime.ClientSdk/           # PWA SDK (IndexedDB, синхронизация)
 ├── WorkTime.WebReact/            # React PWA
 │   └── src/
@@ -474,6 +504,9 @@ dotnet build WorkTime.Desktop/WorkTime.Desktop.csproj
 
 # Веб-клиент
 cd WorkTime.WebReact && npm install && npm run build
+
+# Мобильный клиент (нужны Flutter SDK и JAVA_HOME из Android Studio)
+cd WorkTime.Mobile && flutter analyze && flutter test
 ```
 
 CI (`.github/workflows/ci.yml`) собирает всё решение на ubuntu-latest в Release и
