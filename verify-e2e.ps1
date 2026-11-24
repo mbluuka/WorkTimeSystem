@@ -1,4 +1,5 @@
-# Temporary end-to-end verification of FR7/FR13/FR14/FR15 against the Docker server.
+# End-to-end verification of FR7/FR13/FR14/FR15/FR16 against the Docker server.
+# Requires: docker compose up -d server
 $ErrorActionPreference = "Stop"
 $baseUrl = "http://localhost:8080"
 
@@ -113,6 +114,56 @@ try {
     Write-Host "OK FR7 admin may edit any period"
 } catch {
     Write-Host "FAIL FR7 admin edit: $($_.Exception.Message)"
+}
+
+# --- FR16: PUT /api/users/{id} with isBlocked ---
+$empUser = $mgrUsers | Where-Object email -eq "employee@worktime.local"
+$empUserId = $empUser.id
+# Block the employee (should succeed)
+$updUser = @{ isBlocked = $true } | ConvertTo-Json
+try {
+    Invoke-RestMethod -Uri "$baseUrl/api/users/$empUserId" -Method Put -Headers $H -Body $updUser -ContentType "application/json" | Out-Null
+    Write-Host "OK PUT /api/users blocked employee"
+} catch {
+    Write-Host "FAIL PUT user block: $($_.Exception.Message)"
+}
+# Unblock the employee
+$updUser = @{ isBlocked = $false } | ConvertTo-Json
+try {
+    Invoke-RestMethod -Uri "$baseUrl/api/users/$empUserId" -Method Put -Headers $H -Body $updUser -ContentType "application/json" | Out-Null
+    Write-Host "OK PUT /api/users unblocked employee"
+} catch {
+    Write-Host "FAIL PUT user unblock: $($_.Exception.Message)"
+}
+
+# --- FR16: cannot block own account (admin tries to block self -> 400, not 403) ---
+$allUsers = Invoke-RestMethod -Uri "$baseUrl/api/users" -Headers $H
+$adminUser = $allUsers | Where-Object role -eq "Admin" | Select-Object -First 1
+try {
+    $selfBlock = @{ isBlocked = $true } | ConvertTo-Json
+    Invoke-RestMethod -Uri "$baseUrl/api/users/$($adminUser.id)" -Method Put -Headers $H -Body $selfBlock -ContentType "application/json" | Out-Null
+    Write-Host "FAIL self-block succeeded (should be 400)"
+} catch {
+    $code = $_.Exception.Response.StatusCode.value__
+    if ($code -eq 400) {
+        Write-Host "OK self-block blocked: HTTP $code"
+    } else {
+        Write-Host "FAIL self-block returned HTTP $code (expected 400)"
+    }
+}
+
+# --- DELETE project with work events should return 400 ---
+$proj = $projects[0]  # first project likely has work events from E2E test
+try {
+    Invoke-RestMethod -Uri "$baseUrl/api/projects/$($proj.id)" -Method Delete -Headers $H | Out-Null
+    Write-Host "FAIL DELETE occupied project succeeded (should be 400)"
+} catch {
+    $code = $_.Exception.Response.StatusCode.value__
+    if ($code -eq 400) {
+        Write-Host "OK DELETE occupied project blocked: HTTP $code"
+    } else {
+        Write-Host "FAIL DELETE occupied project returned HTTP $code (expected 400)"
+    }
 }
 
 Write-Host "`nE2E verification finished"
