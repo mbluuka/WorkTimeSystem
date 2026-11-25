@@ -11,9 +11,22 @@
 export function register() {
   if (!('serviceWorker' in navigator)) return
 
+  // Если страницей уже управляет старый SW, после активации новой версии
+  // перезагружаем вкладку один раз: иначе HTML и бандл могут остаться от
+  // предыдущего релиза.
+  const hadController = Boolean(navigator.serviceWorker.controller)
+  let reloading = false
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return
+    reloading = true
+    window.location.reload()
+  })
+
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/service-worker.js')
+      .then((registration) => registration.update())
       .catch((err) => console.warn('Service worker registration failed', err))
   })
 }

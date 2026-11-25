@@ -152,6 +152,9 @@ export default function Dashboard({ onLogout }) {
     loadOutbox()
     loadEvents()
     loadSummary()
+    // Очередь могла остаться с прошлой сессии (закрыли приложение офлайн).
+    // Если сеть уже есть, отправляем её сразу при открытии Dashboard.
+    runSync('mount')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -604,9 +607,9 @@ export default function Dashboard({ onLogout }) {
                   </td>
                   <td>{getProjectName(ev.projectId) || '—'}</td>
                   <td>
-                    {ev.serverOrder
-                      ? <span className="badge-ok">✓ Сервер</span>
-                      : <span className="badge-danger">○ Офлайн</span>
+                    {ev.pending
+                      ? <span className="badge-danger">○ Офлайн</span>
+                      : <span className="badge-ok">✓ Сервер</span>
                     }
                   </td>
                   <td style={{ textAlign: 'right' }}>
