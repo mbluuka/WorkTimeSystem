@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../models/work_event.dart';
 import '../services/api_client.dart';
+import '../services/connectivity_watcher.dart';
 import '../services/device_identity.dart';
 import '../services/sync_service.dart';
 import '../storage/local_event_store.dart';
@@ -19,6 +20,12 @@ class HomeScreen extends StatefulWidget {
   final LocalEventStore store;
   final DeviceIdentity identity;
   final SyncService sync;
+
+  /// Фоновый наблюдатель за сетью (FR10). Экран подписывается на его
+  /// события, чтобы история и индикатор очереди обновлялись сами, когда
+  /// связь вернулась и очередь ушла на сервер.
+  final ConnectivityWatcher watcher;
+
   final VoidCallback onLogout;
 
   const HomeScreen({
@@ -27,6 +34,7 @@ class HomeScreen extends StatefulWidget {
     required this.store,
     required this.identity,
     required this.sync,
+    required this.watcher,
     required this.onLogout,
   });
 
@@ -67,8 +75,26 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+
+    // FR10: когда фоновая синхронизация отработала (вернулась сеть или
+    // сработал таймер), обновляем историю и индикатор очереди — иначе
+    // экран показывал бы устаревшие «ждут отправки».
+    widget.watcher.onSynced = (outcome) {
+      if (!mounted) return;
+      _refresh();
+      _show(outcome.summary, isError: !outcome.ok);
+    };
+
     _refresh();
     _loadProjects();
+  }
+
+  @override
+  void dispose() {
+    // Экран — единственный подписчик; после его закрытия колбэк не нужен
+    // и мог бы дёргать setState на уничтоженном State.
+    widget.watcher.onSynced = null;
+    super.dispose();
   }
 
   Future<void> _refresh() async {

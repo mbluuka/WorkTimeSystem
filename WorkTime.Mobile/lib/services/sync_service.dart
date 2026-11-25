@@ -47,9 +47,25 @@ class SyncService {
   final LocalEventStore store;
   final DeviceIdentity identity;
 
-  const SyncService(this.api, this.store, this.identity);
+  /// Выполняющаяся синхронизация. Сигналов несколько (действие, кнопка,
+  /// событие сети, таймер), и они могут совпасть по времени — второй
+  /// параллельный проход только дублировал бы запросы к серверу.
+  Future<SyncOutcome>? _inFlight;
 
-  Future<SyncOutcome> syncNow() async {
+  SyncService(this.api, this.store, this.identity);
+
+  Future<SyncOutcome> syncNow() {
+    final running = _inFlight;
+    if (running != null) return running;
+
+    final future = _syncOnce();
+    _inFlight = future;
+    // Снимаем признак после завершения, в том числе с ошибкой.
+    future.whenComplete(() => _inFlight = null);
+    return future;
+  }
+
+  Future<SyncOutcome> _syncOnce() async {
     if (!api.hasToken) {
       return const SyncOutcome(error: 'Нет активной сессии');
     }

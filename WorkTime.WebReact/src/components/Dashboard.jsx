@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { api, getCurrentUser } from '../api'
 import { createEvent, getOutbox, syncOutbox, updateOutboxEvent, deleteOutboxEvent } from '../pwaClient'
+import { requestBackgroundSync, runSync, SYNCED_EVENT, SYNC_FAILED_EVENT } from '../offlineSync'
 
 // ============================================================
 // Вспомогательные функции
@@ -154,6 +155,33 @@ export default function Dashboard({ onLogout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ---------- Фоновая синхронизация (FR10) ----------
+  // Очередь может уйти на сервер без участия пользователя: по событию
+  // online, по Background Sync или при возврате на вкладку. Когда это
+  // произошло, подтягиваем свежие данные, чтобы статус и история совпали
+  // с сервером.
+  useEffect(() => {
+    const onSynced = () => {
+      loadOutbox()
+      loadEvents()
+      loadSummary()
+    }
+
+    const onSyncFailed = () => {
+      // Офлайн — штатное состояние: данные остаются в IndexedDB.
+      loadOutbox()
+    }
+
+    window.addEventListener(SYNCED_EVENT, onSynced)
+    window.addEventListener(SYNC_FAILED_EVENT, onSyncFailed)
+
+    return () => {
+      window.removeEventListener(SYNCED_EVENT, onSynced)
+      window.removeEventListener(SYNC_FAILED_EVENT, onSyncFailed)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ---------- Производные данные ----------
   // Статус вычисляется из данных, а не хранится в state: любое изменение
   // outbox или серверных событий мгновенно перекрашивает интерфейс,
@@ -270,13 +298,19 @@ export default function Dashboard({ onLogout }) {
       // МГНОВЕННО обновляем outbox (setOutbox — синхронный setState)
       await loadOutbox()
 
-      // Синхронизация с сервером в фоне
-      try {
-        await syncOutbox({ apiBase: '' })
+      // Синхронизация с сервером в фоне (FR10): runSync сам решает, есть ли
+      // сеть и сессия, и не бросает исключение при офлайне — запись просто
+      // останется в очереди до появления связи.
+      const synced = await runSync('action')
+      if (synced) {
         await loadOutbox()
         await loadEvents()
         await loadSummary()
-      } catch { /* offline — останется в outbox */ }
+      }
+
+      // Просим браузер разбудить нас, когда сеть появится, — на случай,
+      // если вкладку закроют до восстановления связи.
+      requestBackgroundSync()
 
       setSelectedProjectId(null)
       setShowProjectPicker(false)

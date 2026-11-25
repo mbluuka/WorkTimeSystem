@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -45,6 +46,15 @@ public class MainWindow : Window
     private readonly LocalEventStore _store;
     private readonly DesktopApiClient _api;
     private readonly DispatcherTimer _ticker;
+    private readonly DispatcherTimer _autoSyncTimer;
+
+    /// <summary>
+    /// Признак выполняющейся синхронизации. Нужен, потому что сигналов
+    /// несколько (действие, кнопка, таймер, событие сети) и они могут
+    /// прийти одновременно — второй параллельный проход только дублировал бы
+    /// запросы к серверу.
+    /// </summary>
+    private bool _syncing;
 
     private Guid _userId;
     private readonly Guid _deviceId = DesktopPaths.GetOrCreateDeviceId();
@@ -97,10 +107,19 @@ public class MainWindow : Window
         _ticker = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _ticker.Tick += (_, _) => RefreshClock();
 
+        // FR10: попытка дослать очередь раз в 20 секунд. Таймер нужен потому,
+        // что «сеть есть» не значит «сервер доступен»: после перезапуска
+        // контейнера или подключения к другой сети событие сети может не
+        // прийти, а записи должны уйти сами.
+        _autoSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        _autoSyncTimer.Tick += async (_, _) => await TrySyncAsync(auto: true);
+
         Opened += OnWindowOpened;
         Closed += (_, _) =>
         {
             _ticker.Stop();
+            _autoSyncTimer.Stop();
+            NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _db.Dispose();
         };
     }
@@ -283,6 +302,26 @@ public class MainWindow : Window
         {
             _loginStatus.Text = "Не удалось открыть локальную базу: " + ex.Message;
         }
+
+        // FR10: восстановление связи — отдельный сигнал, помимо таймера.
+        // NetworkChange срабатывает сразу, как только в системе появился
+        // рабочий сетевой интерфейс, поэтому очередь уходит без ожидания
+        // очередного тика.
+        NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+    }
+
+    private async void OnNetworkAvailabilityChanged(
+        object? sender,
+        NetworkAvailabilityEventArgs e)
+    {
+        if (!e.IsAvailable)
+        {
+            return;
+        }
+
+        // Событие приходит из сетевого потока — переключаемся на UI-поток,
+        // потому что TrySyncAsync трогает элементы интерфейса.
+        await Dispatcher.UIThread.InvokeAsync(() => TrySyncAsync(auto: true));
     }
 
     private async void OnLoginClick(object? sender, RoutedEventArgs e)
@@ -359,11 +398,15 @@ public class MainWindow : Window
 
         await RefreshAsync();
         _ticker.Start();
+
+        // FR10: периодическая попытка выгрузки очереди при наличии сессии.
+        _autoSyncTimer.Start();
     }
 
     private void OnLogoutClick(object? sender, RoutedEventArgs e)
     {
         _ticker.Stop();
+        _autoSyncTimer.Stop();
         _api.SetToken(null);
         _workPanel.IsVisible = false;
         _loginPanel.IsVisible = true;
@@ -589,6 +632,15 @@ public class MainWindow : Window
             return;
         }
 
+        // Сигналы (действие, кнопка, таймер, появление сети) могут совпасть
+        // по времени — второй параллельный проход не нужен.
+        if (_syncing)
+        {
+            return;
+        }
+
+        _syncing = true;
+
         try
         {
             // SyncService пишет прогресс в Console — вне терминала это безопасно.
@@ -602,6 +654,10 @@ public class MainWindow : Window
                 ? _syncText.Text
                 : "Нет связи с сервером — записи сохранены локально. " + ex.Message;
             _syncText.Foreground = Brushes.DarkOrange;
+        }
+        finally
+        {
+            _syncing = false;
         }
     }
 

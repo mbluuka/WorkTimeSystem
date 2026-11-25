@@ -373,7 +373,7 @@ cd /home/user/WorkTime-Desktop
 | FR7 | Ручная корректировка с ограничением по прошлым периодам | ✅ | `PeriodEditGuard`: окно `TimeEditing:EmployeeEditWindowDays` (7 дн.) для Employee/Manager, Admin без ограничений |
 | FR8 | Автоподсчёт продолжительности и остатка дня | ✅ | `ReportSummary.RemainingMinutes` («до 8 часов»), таймер в Dashboard |
 | FR9 | Локальная БД с полной офлайн-работой | ✅ | SQLite (Console/Desktop), IndexedDB (PWA), outbox-очередь |
-| FR10 | **Фоновая** синхронизация при восстановлении связи | ⚠️ частично | Очередь `SyncQueue` + идемпотентность работают. PWA отправляет outbox **автоматически после каждого действия** (`Dashboard.jsx`, `syncOutbox` в `try/catch` — при офлайн остаётся в outbox). Но реактивации по событию появления сети **нет**: ни слушателя `online`, ни вызова `SyncManager.register()` для тега `sync-outbox`, который обрабатывается в service worker. Desktop и Console синхронизируются только по кнопке/команде. Итог: «при восстановлении соединения» не выполнено — надо снова выполнить действие или нажать кнопку |
+| FR10 | **Фоновая** синхронизация при восстановлении связи | ✅ | Три клиента реагируют на возврат сети без действий пользователя: **PWA** — `src/offlineSync.js` (слушатель `online`, сообщение `SYNC_OUTBOX` от service worker с Background Sync-тегом `sync-outbox`, `visibilitychange`); **Desktop** — `NetworkChange.NetworkAvailabilityChanged` + таймер 20 с; **Mobile** — `connectivity_plus` + таймер 30 с (`ConnectivityWatcher`). Параллельные проходы дедуплицируются (`syncInFlight`, `_syncing`, `_inFlight`). Очередь `SyncQueue`/outbox и идемпотентность сохранены |
 | FR11 | Авторизация и аутентификация (JWT) | ✅ | `AuthController`, BCrypt, claims в JWT |
 | FR12 | Ролевая модель Employee/Manager/Admin | ✅ | Проверки роли в контроллерах, `RoleBadge` в UI |
 | FR13 | Просмотр записей команды руководителем | ✅ | `ManagerView.jsx`, `GET /api/users` доступен Manager |
@@ -382,7 +382,7 @@ cd /home/user/WorkTime-Desktop
 | FR16 | CRUD пользователей администратором | ✅ | `UsersController` + `AdminView` (создание, редактирование ФИО/роли/блокировки, удаление) |
 | FR17 | Просмотр аудита действий | ✅ | `AuditLogsController`, вкладка «Аудит» в AdminView |
 | FR18 | Веб-интерфейс (React) | ✅ | `WorkTime.WebReact` (React 18 + Vite, PWA) |
-| FR19 | **Мобильные приложения (Android/iOS)** | ✅ Android / ⚠️ iOS | `WorkTime.Mobile` (Flutter 3.50, Dart 3.14): вход по JWT, локальная SQLite, офлайн-очередь, push/pull-синхронизация, отметки дня, корректировка и удаление записей. APK собирается (`flutter build apk`), `flutter analyze` без замечаний, 16 тестов. iOS на Windows собрать нельзя (нужен macOS + Xcode) — оставлено как направление развития |
+| FR19 | **Мобильные приложения (Android/iOS)** | ✅ Android / ⚠️ iOS | `WorkTime.Mobile` (Flutter 3.50, Dart 3.14): вход по JWT, локальная SQLite, офлайн-очередь, push/pull-синхронизация, отметки дня, корректировка и удаление записей. APK собирается (`flutter build apk`), `flutter analyze` без замечаний, 25 тестов. iOS на Windows собрать нельзя (нужен macOS + Xcode) — оставлено как направление развития |
 | FR20 | Десктоп (Windows/Linux/RED OS) | ✅ | `WorkTime.Desktop` (Avalonia 11, UI на C# без XAML), мануал публикации для RED OS |
 
 ### Нефункциональные требования
@@ -447,7 +447,7 @@ local-first контракту, что десктопный и консольн�
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 flutter pub get
 flutter analyze          # замечаний нет
-flutter test             # 16 тестов (контракт + widget)
+flutter test             # 25 тестов (контракт + widget + connectivity)
 flutter build apk --debug
 # APK: build\app\outputs\flutter-apk\app-debug.apk
 ```
@@ -499,15 +499,19 @@ WorkTimeSystem/
 ├── WorkTime.Mobile/              # Мобильный клиент (Flutter, Android)
 │   ├── lib/models/               # WorkEvent, WorkEventType, SyncStatus
 │   ├── lib/storage/              # LocalEventStore (SQLite)
-│   ├── lib/services/             # ApiClient, DeviceIdentity, SyncService
+│   ├── lib/services/             # ApiClient, DeviceIdentity, SyncService, ConnectivityWatcher
 │   ├── lib/screens/              # LoginScreen, HomeScreen
 │   └── android/                  # Gradle-проект, AndroidManifest
 ├── WorkTime.ClientSdk/           # PWA SDK (IndexedDB, синхронизация)
 ├── WorkTime.WebReact/            # React PWA
-│   └── src/
-│       ├── components/           # Login, Dashboard, ManagerView, AdminView
-│       ├── api.js                # API-клиент с JWT
-│       └── pwaClient.js          # Мост к SDK
+│   ├── public/
+│   │   └── service-worker.js     # Background Sync (sync-outbox)
+│   ├── src/
+│   │   ├── components/           # Login, Dashboard, ManagerView, AdminView
+│   │   ├── api.js                # API-клиент с JWT
+│   │   ├── pwaClient.js          # Мост к SDK
+│   │   ├── offlineSync.js        # Фоновая синхронизация (FR10)
+│   │   └── registerServiceWorker.js
 ├── WorkTime.Server.Tests/        # Модульные тесты сервера
 ├── WorkTime.Server.IntegrationTests/  # Интеграционные тесты (WebApplicationFactory)
 ├── docker-compose.yml            # Docker: PostgreSQL + сервер
@@ -540,7 +544,7 @@ cd WorkTime.Mobile && flutter analyze && flutter test
 ```
 
 Итого: **30** тестов на .NET-стороне (25 модульных + 5 интеграционных) и
-**16** тестов мобильного клиента (контракт JSON/SQLite + widget) — **46**.
+**25** тестов мобильного клиента (контракт JSON/SQLite + widget + connectivity) — **55**.
 
 CI (`.github/workflows/ci.yml`) собирает всё решение на ubuntu-latest в Release и
 прогоняет тесты против PostgreSQL-сервиса. Мобильный клиент в CI **не** собирается:

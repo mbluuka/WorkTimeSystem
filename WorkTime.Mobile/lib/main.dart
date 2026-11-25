@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 
 import 'services/api_client.dart';
+import 'services/connectivity_watcher.dart';
 import 'services/device_identity.dart';
 import 'services/sync_service.dart';
 import 'storage/local_event_store.dart';
@@ -33,6 +34,7 @@ class _WorkTimeAppState extends State<WorkTimeApp> {
   final _store = LocalEventStore();
   late final ApiClient _api;
   late final SyncService _sync;
+  late final ConnectivityWatcher _watcher;
 
   bool _ready = false;
   bool _loggedIn = false;
@@ -47,11 +49,16 @@ class _WorkTimeAppState extends State<WorkTimeApp> {
     await _identity.init();
     _api = ApiClient(_identity.serverUrl());
     _sync = SyncService(_api, _store, _identity);
+    _watcher = ConnectivityWatcher(_sync);
 
     final restored = await _identity.restoreSession(_api);
 
     // Сессию не «проверяем» локально: если токен просрочен, первый же
     // запрос вернёт 401 и UI отправит пользователя на вход.
+    if (restored) {
+      await _watcher.start();
+    }
+
     if (mounted) {
       setState(() {
         _loggedIn = restored;
@@ -60,7 +67,14 @@ class _WorkTimeAppState extends State<WorkTimeApp> {
     }
   }
 
+  void _onLoggedIn() {
+    setState(() => _loggedIn = true);
+    // FR10: после входа очередь уходит сама при появлении связи.
+    _watcher.start();
+  }
+
   void _logout() {
+    _watcher.stop();
     _api.setToken(null);
     _identity.clearSession();
     setState(() => _loggedIn = false);
@@ -85,13 +99,20 @@ class _WorkTimeAppState extends State<WorkTimeApp> {
                   store: _store,
                   identity: _identity,
                   sync: _sync,
+                  watcher: _watcher,
                   onLogout: _logout,
                 )
               : LoginScreen(
                   api: _api,
                   identity: _identity,
-                  onLoggedIn: () => setState(() => _loggedIn = true),
+                  onLoggedIn: _onLoggedIn,
                 ),
     );
+  }
+
+  @override
+  void dispose() {
+    _watcher.stop();
+    super.dispose();
   }
 }
