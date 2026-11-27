@@ -10,7 +10,7 @@ public class User
 
     public string? PasswordHash { get; set; }
 
-    public string Role { get; set; } = "Employee"; // Employee/Manager/Admin
+    public string Role { get; set; } = "Employee"; // Employee/Manager/Admin/Test
 
     public string? FullName { get; set; }
 
